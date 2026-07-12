@@ -10,10 +10,27 @@ specific container, with sane defaults for the upstream chart.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Optional
+
+
+# Safe pattern for Kubernetes resource names and file paths: alphanumeric,
+# slashes, dots, hyphens, underscores.  Rejects shell metacharacters and
+# null bytes that could be exploited in argument injection.
+_VALID_PATH_RE = re.compile(r"^[\w./-]+\Z")
+
+
+def _check_path(label: str, value: str) -> str:
+    if not _VALID_PATH_RE.match(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Only alphanumeric characters, dots, hyphens, underscores, "
+            "and forward slashes are permitted."
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -22,6 +39,30 @@ class K8sTarget:
     deployment: str = "espresense-companion"
     container: str = "espresense-companion"
     config_path: str = "/config/espresense/config.yaml"
+
+    def __post_init__(self) -> None:
+        # Validate all user-supplied fields at construction time so every
+        # method is guaranteed to receive safe values.
+        object.__setattr__(
+            self,
+            "namespace",
+            _check_path("namespace", self.namespace),
+        )
+        object.__setattr__(
+            self,
+            "deployment",
+            _check_path("deployment", self.deployment),
+        )
+        object.__setattr__(
+            self,
+            "container",
+            _check_path("container", self.container),
+        )
+        object.__setattr__(
+            self,
+            "config_path",
+            _check_path("config_path", self.config_path),
+        )
 
 
 def _kubectl() -> str:
@@ -103,16 +144,19 @@ def write_config(target: K8sTarget, yaml_text: str, *, backup: bool = True) -> N
     When backup=True, a timestamped copy of the existing file is left at
     <path>.<unix-ts>.bak before the overwrite, so the change is reversible.
     """
+    # Generate the timestamp inside the pod so the backup file reflects the
+    # pod's clock, not the host's.
+    ts_proc = exec_(target, ["date", "+%s"], check=True)
+    ts = int(ts_proc.stdout.decode("utf-8").strip())
+    bak_path = f"{target.config_path}.{ts}.bak"
     if backup:
         exec_(target, [
-            "sh", "-c",
-            f"cp {target.config_path} {target.config_path}.$(date +%s).bak",
+            "cp", target.config_path, bak_path,
         ], check=False)
     # tee-by-stdin pattern: feed the file content as stdin, write with `dd`
     # so newlines and trailing whitespace are preserved verbatim.
     exec_(target, [
-        "sh", "-c",
-        f"cat > {target.config_path}",
+        "dd", f"of={target.config_path}",
     ], stdin=yaml_text, check=True)
 
 
