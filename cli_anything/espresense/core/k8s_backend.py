@@ -33,6 +33,23 @@ def _check_path(label: str, value: str) -> str:
     return value
 
 
+# kubectl rollout --timeout accepts a Go duration string: an integer
+# (seconds) optionally suffixed with a single unit (s, m, h).  We reject
+# anything else so a user-supplied timeout can never inject extra kubectl
+# arguments (e.g. ``--namespace=kube-system``) or shell metacharacters.
+_VALID_TIMEOUT_RE = re.compile(r"^\d{1,9}(s|m|h)?\Z")
+
+
+def _check_timeout(value: str) -> str:
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"timeout contains unsafe characters (got {value!r}). "
+            "Only a non-negative integer optionally followed by a single "
+            "unit (s, m, h) is permitted."
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class K8sTarget:
     namespace: str = "espresense"
@@ -170,6 +187,9 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    # Validate the user-supplied timeout before it is interpolated into a
+    # kubectl argument so it cannot inject extra flags or metacharacters.
+    timeout = _check_timeout(timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",
