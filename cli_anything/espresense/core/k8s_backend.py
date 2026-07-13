@@ -22,6 +22,17 @@ from typing import Optional
 # null bytes that could be exploited in argument injection.
 _VALID_PATH_RE = re.compile(r"^[\w./-]+\Z")
 
+# Safe pattern for kubectl timeout values: digits followed by an optional
+# time unit suffix (s, m, h).  Rejects shell metacharacters, additional
+# flags, semicolons, and anything that is not a simple duration string.
+_VALID_TIMEOUT_RE = re.compile(r"^\d+[smh]\Z")
+
+# Safe pattern for individual argv elements passed to ``kubectl exec --``:
+# ASCII alphanumeric, spaces, dots, slashes, hyphens, underscores, equals,
+# percent, plus, and colons.  Rejects shell metacharacters, null bytes,
+# and values that start with a dash (which could inject kubectl flags).
+_VALID_ARGV_RE = re.compile(r"^[^-][a-zA-Z0-9 ./=%+:-]*\Z")
+
 
 def _check_path(label: str, value: str) -> str:
     if not _VALID_PATH_RE.match(value):
@@ -31,6 +42,58 @@ def _check_path(label: str, value: str) -> str:
             "and forward slashes are permitted."
         )
     return value
+
+
+def _check_timeout(label: str, value: str) -> str:
+    """Validate a kubectl timeout value (e.g. ``120s``, ``5m``, ``1h``).
+
+    Rejects anything that is not a bare digits-plus-unit duration so that
+    shell metacharacters or additional kubectl flags cannot be injected
+    through the ``--timeout=`` argument.
+    """
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Only a positive integer followed by a time unit "
+            "(s, m, or h) is permitted, e.g. '120s' or '5m'."
+        )
+    return value
+
+
+def _check_argv(label: str, value: str) -> str:
+    """Validate a single argv element before it is passed to ``kubectl exec``.
+
+    Rejects values that start with a dash (which could inject kubectl
+    flags), contain shell metacharacters, whitespace beyond spaces, or
+    null bytes.  This is a defence-in-depth check — ``subprocess.run``
+    already uses a list (never ``shell=True``), but validating here
+    ensures that no unsanitised value can reach the container process.
+    """
+    if not _VALID_ARGV_RE.match(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Only ASCII alphanumeric characters, spaces, dots, hyphens, "
+            "underscores, forward slashes, equals signs, percent, plus, "
+            "and colons are permitted. Values must not start with a dash."
+        )
+    return value
+
+
+def _validate_target(target: "K8sTarget") -> "K8sTarget":
+    """Re-validate every user-supplied field on *target* before it reaches
+    a kubectl invocation.
+
+    ``K8sTarget.__post_init__`` validates at construction time, but a frozen
+    dataclass can still be mutated via ``object.__setattr__``.  This
+    defence-in-depth check ensures that no unsanitised value can reach a
+    kubectl or shell call, regardless of how the target was created or
+    modified.
+    """
+    _check_path("namespace", target.namespace)
+    _check_path("deployment", target.deployment)
+    _check_path("container", target.container)
+    _check_path("config_path", target.config_path)
+    return target
 
 
 @dataclass(frozen=True)
@@ -83,7 +146,14 @@ def _run(
     check: bool = True,
     text: bool = True,
 ) -> subprocess.CompletedProcess:
-    """Run a kubectl command. Raises if it fails (when check=True)."""
+    """Run a kubectl command. Raises if it fails (when check=True).
+
+    Every element in *args* is passed directly to ``subprocess.run`` as a
+    list — never joined into a shell string — so there is no shell
+    interpretation layer.  Callers are responsible for validating
+    user-supplied values before they reach this function (see
+    ``_validate_target`` and ``_check_argv``).
+    """
     kc = _kubectl()
     proc = subprocess.run(
         [kc, *args],
@@ -102,6 +172,7 @@ def _run(
 
 def pod_name(target: K8sTarget) -> str:
     """Resolve the running pod for the deployment."""
+    _validate_target(target)
     proc = _run([
         "-n", target.namespace,
         "get", "pods",
@@ -118,6 +189,11 @@ def pod_name(target: K8sTarget) -> str:
 def exec_(target: K8sTarget, argv: list[str], *, stdin: Optional[str] = None,
           check: bool = True) -> subprocess.CompletedProcess:
     """Run a command inside the companion container."""
+    _validate_target(target)
+    # Validate every argv element so that shell metacharacters or kubectl
+    # flag injection cannot sneak through the ``--`` separator.
+    for i, arg in enumerate(argv):
+        _check_argv(f"argv[{i}]", arg)
     args = [
         "-n", target.namespace,
         "exec",
@@ -162,6 +238,7 @@ def write_config(target: K8sTarget, yaml_text: str, *, backup: bool = True) -> N
 
 def restart(target: K8sTarget) -> None:
     """Trigger a rolling restart of the companion deployment."""
+    _validate_target(target)
     _run([
         "-n", target.namespace,
         "rollout", "restart",
@@ -170,6 +247,11 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    # Validate the user-supplied timeout before it reaches kubectl so that
+    # shell metacharacters or extra flags cannot be injected via the
+    # --timeout= argument.
+    _check_timeout("timeout", timeout)
+    _validate_target(target)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",
