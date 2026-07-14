@@ -33,6 +33,22 @@ def _check_path(label: str, value: str) -> str:
     return value
 
 
+# Safe pattern for kubectl rollout timeout values: digits followed by an
+# optional single-letter time suffix (s, m, h).  Rejects anything that
+# could be interpreted as an additional kubectl flag or argument.
+_VALID_TIMEOUT_RE = re.compile(r"^\d+[smh]?\Z")
+
+
+def _check_timeout(label: str, value: str) -> str:
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Only a non-negative integer with an optional single-letter "
+            "time suffix (s, m, h) is permitted."
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class K8sTarget:
     namespace: str = "espresense"
@@ -63,6 +79,23 @@ class K8sTarget:
             "config_path",
             _check_path("config_path", self.config_path),
         )
+
+
+def _validate_target(target: K8sTarget) -> K8sTarget:
+    """Re-validate every user-supplied K8sTarget field before it reaches
+    kubectl.
+
+    ``K8sTarget.__post_init__`` already validates at construction, but a
+    frozen dataclass can still be mutated via ``object.__setattr__``.  This
+    defence-in-depth check ensures that no unsanitised value ever reaches
+    ``_run`` / kubectl, regardless of how the target was created or
+    modified.
+    """
+    _check_path("namespace", target.namespace)
+    _check_path("deployment", target.deployment)
+    _check_path("container", target.container)
+    _check_path("config_path", target.config_path)
+    return target
 
 
 def _kubectl() -> str:
@@ -102,6 +135,7 @@ def _run(
 
 def pod_name(target: K8sTarget) -> str:
     """Resolve the running pod for the deployment."""
+    _validate_target(target)
     proc = _run([
         "-n", target.namespace,
         "get", "pods",
@@ -118,6 +152,7 @@ def pod_name(target: K8sTarget) -> str:
 def exec_(target: K8sTarget, argv: list[str], *, stdin: Optional[str] = None,
           check: bool = True) -> subprocess.CompletedProcess:
     """Run a command inside the companion container."""
+    _validate_target(target)
     args = [
         "-n", target.namespace,
         "exec",
@@ -162,6 +197,7 @@ def write_config(target: K8sTarget, yaml_text: str, *, backup: bool = True) -> N
 
 def restart(target: K8sTarget) -> None:
     """Trigger a rolling restart of the companion deployment."""
+    _validate_target(target)
     _run([
         "-n", target.namespace,
         "rollout", "restart",
@@ -170,6 +206,8 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    _validate_target(target)
+    _check_timeout("timeout", timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",

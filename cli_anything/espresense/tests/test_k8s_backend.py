@@ -191,3 +191,228 @@ class TestRunListArgument:
                 # args must be a list
                 args = mock_run.call_args[0][0] if mock_run.call_args[0] else None
                 assert isinstance(args, list)
+
+
+# ── rollout_status timeout validation ───────────────────────────────────────
+
+class TestRolloutTimeoutValidation:
+    """The timeout parameter in rollout_status must be validated to prevent
+    argument injection via crafted timeout strings (e.g. ``--server=…``)."""
+
+    def test_default_timeout_is_valid(self):
+        """The default timeout '120s' must pass validation and reach _run."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="ok", stderr="")
+            k8s_backend.rollout_status(target)
+            args_list = mock_run.call_args[0][0]
+            timeout_arg = next(a for a in args_list if a.startswith("--timeout="))
+            assert timeout_arg == "--timeout=120s"
+
+    @pytest.mark.parametrize(
+        "timeout",
+        [
+            # Argument injection via additional kubectl flags
+            "120s --namespace=evil",
+            "120s --server=https://evil.com",
+            "--namespace=attacker",
+            # Shell metacharacters
+            "120s; rm -rf /",
+            "120s && id",
+            "120s|cat",
+            "120s\n",
+            "120s`id`",
+            "120s$(id)",
+            # Empty / whitespace
+            "",
+            "   ",
+            # Non-numeric garbage
+            "abc",
+            "12.5s",
+            "-1s",
+        ],
+    )
+    def test_rejects_unsafe_timeout(self, timeout):
+        """Unsafe timeout values must raise ValueError before _run is called."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            with pytest.raises(ValueError, match=r"contains unsafe characters"):
+                k8s_backend.rollout_status(target, timeout=timeout)
+            mock_run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "timeout",
+        [
+            "120s",
+            "60s",
+            "5m",
+            "1h",
+            "30",
+            "0s",
+            "999s",
+            "2h",
+            "10m",
+        ],
+    )
+    def test_accepts_valid_timeout(self, timeout):
+        """Valid timeout values must be passed through to _run unchanged."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="ok", stderr="")
+            k8s_backend.rollout_status(target, timeout=timeout)
+            args_list = mock_run.call_args[0][0]
+            timeout_arg = next(a for a in args_list if a.startswith("--timeout="))
+            assert timeout_arg == f"--timeout={timeout}"
+
+
+# ── Defence-in-depth: point-of-use validation ───────────────────────────────
+
+class TestPointOfUseValidation:
+    """Even if K8sTarget.__post_init__ is bypassed (e.g. via
+    ``object.__setattr__`` on the frozen dataclass), every function that
+    passes user-supplied fields to ``_run`` must re-validate before the
+    value reaches kubectl.
+
+    This is defence-in-depth: construction-time validation is the first
+    line of defence, but point-of-use validation ensures no unsanitised
+    input can ever reach a kubectl invocation.
+    """
+
+    @staticmethod
+    def _bypassed_target(**overrides) -> k8s_backend.K8sTarget:
+        """Create a K8sTarget then bypass __post_init__ with unsafe values."""
+        target = k8s_backend.K8sTarget()
+        for field, value in overrides.items():
+            object.__setattr__(target, field, value)
+        return target
+
+    # ── restart ──────────────────────────────────────────────────────────
+
+    @pytest.mark.parametrize(
+        "field,malicious",
+        [
+            ("namespace", "--server=https://evil.com"),
+            ("namespace", "ns; rm -rf /"),
+            ("namespace", "ns$(id)"),
+            ("deployment", "deploy --server=evil"),
+            ("deployment", "deploy;sleep 10"),
+            ("deployment", "deploy$(whoami)"),
+        ],
+    )
+    def test_restart_validates_target_fields(self, field, malicious):
+        """restart must reject unsafe K8sTarget fields before _run."""
+        target = self._bypassed_target(**{field: malicious})
+        with patch.object(k8s_backend, "_run") as mock_run:
+            with pytest.raises(ValueError, match=r"contains unsafe characters"):
+                k8s_backend.restart(target)
+            mock_run.assert_not_called()
+
+    def test_restart_accepts_valid_target(self):
+        """restart with a legitimately constructed target still works."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            k8s_backend.restart(target)
+            mock_run.assert_called_once()
+
+    # ── pod_name ─────────────────────────────────────────────────────────
+
+    @pytest.mark.parametrize(
+        "field,malicious",
+        [
+            ("namespace", "--namespace=evil"),
+            ("namespace", "ns|cat /etc/passwd"),
+            ("deployment", "deploy$(id)"),
+            ("deployment", "deploy;sleep 10"),
+        ],
+    )
+    def test_pod_name_validates_target_fields(self, field, malicious):
+        """pod_name must reject unsafe K8sTarget fields before _run."""
+        target = self._bypassed_target(**{field: malicious})
+        with patch.object(k8s_backend, "_run") as mock_run:
+            with pytest.raises(ValueError, match=r"contains unsafe characters"):
+                k8s_backend.pod_name(target)
+            mock_run.assert_not_called()
+
+    # ── exec_ ────────────────────────────────────────────────────────────
+
+    @pytest.mark.parametrize(
+        "field,malicious",
+        [
+            ("namespace", "--server=evil.com"),
+            ("namespace", "ns\n"),
+            ("deployment", "deploy$(id)"),
+            ("deployment", "deploy`id`"),
+            ("container", "ctr;sleep 10"),
+            ("container", "ctr --server=evil"),
+            ("config_path", "/config; curl evil"),
+            ("config_path", "/config$(id)"),
+        ],
+    )
+    def test_exec_validates_target_fields(self, field, malicious):
+        """exec_ must reject unsafe K8sTarget fields before _run."""
+        target = self._bypassed_target(**{field: malicious})
+        with patch.object(k8s_backend, "_run") as mock_run:
+            with pytest.raises(ValueError, match=r"contains unsafe characters"):
+                k8s_backend.exec_(target, ["echo", "hi"], check=False)
+            mock_run.assert_not_called()
+
+    # ── rollout_status ───────────────────────────────────────────────────
+
+    @pytest.mark.parametrize(
+        "field,malicious",
+        [
+            ("namespace", "--namespace=attacker"),
+            ("namespace", "ns && id"),
+            ("deployment", "deploy --server=evil"),
+            ("deployment", "deploy; rm -rf /"),
+        ],
+    )
+    def test_rollout_status_validates_target_fields(self, field, malicious):
+        """rollout_status must reject unsafe K8sTarget fields before _run."""
+        target = self._bypassed_target(**{field: malicious})
+        with patch.object(k8s_backend, "_run") as mock_run:
+            with pytest.raises(ValueError, match=r"contains unsafe characters"):
+                k8s_backend.rollout_status(target)
+            mock_run.assert_not_called()
+
+    def test_rollout_status_validates_both_target_and_timeout(self):
+        """rollout_status must validate both target fields and timeout."""
+        # Unsafe timeout with a valid target
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            with pytest.raises(ValueError, match=r"contains unsafe characters"):
+                k8s_backend.rollout_status(target, timeout="120s; rm -rf /")
+            mock_run.assert_not_called()
+
+    # ── read_config / write_config (via exec_) ───────────────────────────
+
+    def test_read_config_validates_config_path(self):
+        """read_config must reject an unsafe config_path before _run."""
+        target = self._bypassed_target(config_path="/config; curl evil")
+        with patch.object(k8s_backend, "_run") as mock_run:
+            with pytest.raises(ValueError, match=r"contains unsafe characters"):
+                k8s_backend.read_config(target)
+            mock_run.assert_not_called()
+
+    def test_write_config_validates_config_path(self):
+        """write_config must reject an unsafe config_path before _run."""
+        target = self._bypassed_target(config_path="/config$(id)")
+        with patch.object(k8s_backend, "_run") as mock_run:
+            with pytest.raises(ValueError, match=r"contains unsafe characters"):
+                k8s_backend.write_config(target, "yaml: data", backup=False)
+            mock_run.assert_not_called()
+
+    # ── _validate_target is called for every public function ─────────────
+
+    def test_validate_target_exists(self):
+        """The _validate_target helper must exist and be callable."""
+        assert hasattr(k8s_backend, "_validate_target")
+        target = k8s_backend.K8sTarget()
+        assert k8s_backend._validate_target(target) is target
+
+    def test_validate_target_rejects_unsafe(self):
+        """_validate_target must raise on any unsafe field."""
+        target = self._bypassed_target(namespace="ns;evil")
+        with pytest.raises(ValueError, match=r"contains unsafe characters"):
+            k8s_backend._validate_target(target)
