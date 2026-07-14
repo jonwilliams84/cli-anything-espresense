@@ -191,3 +191,84 @@ class TestRunListArgument:
                 # args must be a list
                 args = mock_run.call_args[0][0] if mock_run.call_args[0] else None
                 assert isinstance(args, list)
+
+
+# ── leading-dash argument injection ─────────────────────────────────────────
+
+class TestLeadingDashRejection:
+    """Values starting with ``-`` must be rejected to prevent argument
+    injection where a field is passed as a bare kubectl flag value
+    (e.g. ``-n <namespace>`` or ``-c <container>``)."""
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("namespace", "--all-namespaces"),
+            ("namespace", "-n"),
+            ("namespace", "--"),
+            ("deployment", "--all"),
+            ("deployment", "-x"),
+            ("container", "-c"),
+            ("container", "--stdin"),
+            ("config_path", "--help"),
+            ("config_path", "-"),
+        ],
+    )
+    def test_rejects_leading_dash(self, field, value):
+        with pytest.raises(ValueError, match=r"must not start with a hyphen"):
+            k8s_backend.K8sTarget(**{field: value})
+
+
+# ── non-ASCII rejection ──────────────────────────────────────────────────────
+
+class TestNonAsciiRejection:
+    """The validation regex must be ASCII-only so Unicode word characters
+    (which Python's ``\\w`` matches by default) cannot slip through."""
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("namespace", "café"),
+            ("namespace", "naïve"),
+            ("deployment", "deploy_日本"),
+            ("container", "контейнер"),
+        ],
+    )
+    def test_rejects_non_ascii(self, field, value):
+        with pytest.raises(ValueError, match=r"contains unsafe characters"):
+            k8s_backend.K8sTarget(**{field: value})
+
+
+# ── timeout validation ──────────────────────────────────────────────────────
+
+class TestTimeoutValidation:
+    """rollout_status timeout must be validated before reaching kubectl."""
+
+    @pytest.mark.parametrize("value", ["120s", "5m", "1h", "30", "0s"])
+    def test_accepts_valid_timeout(self, value):
+        assert k8s_backend._check_timeout(value) == value
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "--foo",
+            "120s; rm -rf /",
+            "abc",
+            "",
+            "-5s",
+            "12s5",
+            "120s ",
+            " 120s",
+        ],
+    )
+    def test_rejects_invalid_timeout(self, value):
+        with pytest.raises(ValueError, match=r"timeout contains unsafe characters"):
+            k8s_backend._check_timeout(value)
+
+    def test_rollout_status_validates_timeout(self):
+        """rollout_status must reject an unsafe timeout before calling kubectl."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            with pytest.raises(ValueError, match=r"timeout contains unsafe characters"):
+                k8s_backend.rollout_status(target, timeout="--foo")
+            mock_run.assert_not_called()

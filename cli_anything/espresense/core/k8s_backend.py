@@ -17,18 +17,41 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-# Safe pattern for Kubernetes resource names and file paths: alphanumeric,
-# slashes, dots, hyphens, underscores.  Rejects shell metacharacters and
-# null bytes that could be exploited in argument injection.
-_VALID_PATH_RE = re.compile(r"^[\w./-]+\Z")
+# Safe pattern for Kubernetes resource names and file paths: ASCII
+# alphanumeric, slashes, dots, hyphens, underscores.  Rejects shell
+# metacharacters, null bytes, whitespace, and non-ASCII characters that
+# could be exploited in command or argument injection.  The re.ASCII flag
+# ensures ``\w`` matches only ``[a-zA-Z0-9_]`` and not Unicode word chars.
+_VALID_PATH_RE = re.compile(r"^[a-zA-Z0-9_./-]+\Z", re.ASCII)
+
+# A kubectl --timeout value: digits followed by an optional unit suffix
+# (s, m, h).  Anchored and ASCII-only so it can never start with ``--`` or
+# contain shell metacharacters.
+_VALID_TIMEOUT_RE = re.compile(r"^[0-9]+[smh]?\Z", re.ASCII)
 
 
 def _check_path(label: str, value: str) -> str:
-    if not _VALID_PATH_RE.match(value):
+    if not isinstance(value, str) or not _VALID_PATH_RE.match(value):
         raise ValueError(
             f"{label} contains unsafe characters (got {value!r}). "
-            "Only alphanumeric characters, dots, hyphens, underscores, "
-            "and forward slashes are permitted."
+            "Only ASCII alphanumeric characters, dots, hyphens, "
+            "underscores, and forward slashes are permitted."
+        )
+    # Reject a leading hyphen: a value such as ``--all-namespaces`` would
+    # be interpreted as a kubectl flag rather than a value when passed as
+    # a bare argument (e.g. ``-n <namespace>`` or ``-c <container>``).
+    if value.startswith("-"):
+        raise ValueError(
+            f"{label} must not start with a hyphen (got {value!r})."
+        )
+    return value
+
+
+def _check_timeout(value: str) -> str:
+    if not isinstance(value, str) or not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"timeout contains unsafe characters (got {value!r}). "
+            "Expected a positive integer optionally followed by s, m, or h."
         )
     return value
 
@@ -170,6 +193,7 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    _check_timeout(timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",
