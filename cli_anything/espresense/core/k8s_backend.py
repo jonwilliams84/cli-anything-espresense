@@ -22,6 +22,11 @@ from typing import Optional
 # null bytes that could be exploited in argument injection.
 _VALID_PATH_RE = re.compile(r"^[\w./-]+\Z")
 
+# Safe pattern for kubectl --timeout values: digits followed by a single
+# time-unit suffix (s, m, h).  Rejects spaces, shell metacharacters, extra
+# flags, and null bytes that could be exploited in argument injection.
+_VALID_TIMEOUT_RE = re.compile(r"^\d+[smh]\Z")
+
 
 def _check_path(label: str, value: str) -> str:
     if not _VALID_PATH_RE.match(value):
@@ -29,6 +34,22 @@ def _check_path(label: str, value: str) -> str:
             f"{label} contains unsafe characters (got {value!r}). "
             "Only alphanumeric characters, dots, hyphens, underscores, "
             "and forward slashes are permitted."
+        )
+    return value
+
+
+def _check_timeout(label: str, value: str) -> str:
+    """Validate a kubectl --timeout value (e.g. ``120s``, ``5m``, ``1h``).
+
+    Only digits followed by a single time-unit suffix are permitted.  This
+    prevents argument injection via values like ``"120s --namespace=evil"``
+    or shell metacharacters.
+    """
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"{label} contains an unsafe or malformed value (got {value!r}). "
+            "Only a positive integer followed by 's', 'm', or 'h' is permitted "
+            "(e.g. '120s', '5m', '1h')."
         )
     return value
 
@@ -170,6 +191,7 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    _check_timeout("timeout", timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",
