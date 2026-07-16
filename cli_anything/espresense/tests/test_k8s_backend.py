@@ -191,3 +191,179 @@ class TestRunListArgument:
                 # args must be a list
                 args = mock_run.call_args[0][0] if mock_run.call_args[0] else None
                 assert isinstance(args, list)
+
+
+# ── Regression: path traversal in config_path ────────────────────────────────
+
+class TestPathTraversalRejection:
+    """config_path must reject ``..`` sequences that could escape the
+    intended directory inside the container."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "../../etc/passwd",
+            "/config/../../../etc/shadow",
+            "/config/..",
+            "..",
+            "/config/../other",
+        ],
+    )
+    def test_rejects_path_traversal(self, value):
+        with pytest.raises(ValueError, match=r"contains unsafe characters"):
+            k8s_backend.K8sTarget(config_path=value)
+
+
+# ── Regression: exec_ argv validation ─────────────────────────────────────────
+
+class TestExecArgvValidation:
+    """exec_ must reject argv elements that could inject kubectl flags."""
+
+    def test_rejects_flag_injection_via_argv(self):
+        """An argv element starting with '-' must be rejected."""
+        target = k8s_backend.K8sTarget()
+        with pytest.raises(ValueError, match=r"must not start with '-'"):
+            k8s_backend.exec_(target, ["--namespace=evil", "cat"], check=False)
+
+    def test_rejects_empty_argv_element(self):
+        target = k8s_backend.K8sTarget()
+        with pytest.raises(ValueError, match=r"must not be empty"):
+            k8s_backend.exec_(target, ["cat", ""], check=False)
+
+    def test_rejects_null_byte_in_argv(self):
+        target = k8s_backend.K8sTarget()
+        with pytest.raises(ValueError, match=r"unsafe characters"):
+            k8s_backend.exec_(target, ["cat", "file\x00name"], check=False)
+
+    def test_rejects_newline_in_argv(self):
+        target = k8s_backend.K8sTarget()
+        with pytest.raises(ValueError, match=r"unsafe characters"):
+            k8s_backend.exec_(target, ["cat", "file\nname"], check=False)
+
+    def test_valid_argv_passes_through(self):
+        """Normal argv elements are not rejected."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=b"ok")
+            k8s_backend.exec_(target, ["cat", "/safe/path/config.yaml"], check=False)
+            args_list = mock_run.call_args[0][0]
+            assert "--" in args_list
+            assert "cat" in args_list
+            assert "/safe/path/config.yaml" in args_list
+
+
+# ── Regression: rollout_status timeout validation ─────────────────────────────
+
+class TestRolloutStatusTimeout:
+    """rollout_status must reject crafted timeout values."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "120s; rm -rf /",
+            "0m && id",
+            "5m --namespace=evil",
+            "",
+            "abc",
+            "120",
+            "120x",
+            "120ss",
+        ],
+    )
+    def test_rejects_invalid_timeout(self, value):
+        target = k8s_backend.K8sTarget()
+        with pytest.raises(ValueError, match=r"is not a valid duration"):
+            k8s_backend.rollout_status(target, timeout=value)
+
+    @pytest.mark.parametrize("value", ["120s", "5m", "1h", "30s", "10m"])
+    def test_accepts_valid_timeout(self, value):
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
+            k8s_backend.rollout_status(target, timeout=value)
+            args_list = mock_run.call_args[0][0]
+            timeout_arg = next(a for a in args_list if a.startswith("--timeout="))
+            assert timeout_arg == f"--timeout={value}"
+
+
+# ── Regression: sanitised values reach subprocess.run ─────────────────────────
+
+class TestSanitisedValuesAtCallSite:
+    """Verify that only sanitised values reach subprocess.run — the actual
+    injection point at lines ~104-110 of _run."""
+
+    def test_pod_name_passes_sanitised_values(self):
+        """pod_name must pass the validated namespace and deployment."""
+        target = k8s_backend.K8sTarget(namespace="safe-ns", deployment="safe-deploy")
+        with patch.object(k8s_backend, "_kubectl", return_value="/bin/kubectl"):
+            with patch.object(k8s_backend.subprocess, "run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="pod-abc\n", stderr="")
+                k8s_backend.pod_name(target)
+                args = mock_run.call_args[0][0]
+                # args is [kubectl, -n, namespace, get, pods, -l, app=..., -o, ...]
+                assert "-n" in args
+                ns_idx = args.index("-n")
+                assert args[ns_idx + 1] == "safe-ns"
+                # label selector uses the validated deployment name
+                label_idx = args.index("-l")
+                assert args[label_idx + 1] == "app=safe-deploy"
+
+    def test_restart_passes_sanitised_values(self):
+        """restart must pass validated namespace and deployment."""
+        target = k8s_backend.K8sTarget(namespace="my-ns", deployment="my-deploy")
+        with patch.object(k8s_backend, "_kubectl", return_value="/bin/kubectl"):
+            with patch.object(k8s_backend.subprocess, "run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                k8s_backend.restart(target)
+                args = mock_run.call_args[0][0]
+                assert "-n" in args
+                ns_idx = args.index("-n")
+                assert args[ns_idx + 1] == "my-ns"
+                assert "deployment/my-deploy" in args
+
+    def test_rollout_status_passes_sanitised_values(self):
+        """rollout_status must pass validated namespace, deployment, and timeout."""
+        target = k8s_backend.K8sTarget(namespace="my-ns", deployment="my-deploy")
+        with patch.object(k8s_backend, "_kubectl", return_value="/bin/kubectl"):
+            with patch.object(k8s_backend.subprocess, "run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+                k8s_backend.rollout_status(target, timeout="60s")
+                args = mock_run.call_args[0][0]
+                assert "-n" in args
+                ns_idx = args.index("-n")
+                assert args[ns_idx + 1] == "my-ns"
+                assert "deployment/my-deploy" in args
+                assert "--timeout=60s" in args
+
+    def test_exec_passes_sanitised_values(self):
+        """exec_ must pass validated namespace, deployment, and container."""
+        target = k8s_backend.K8sTarget(
+            namespace="my-ns", deployment="my-deploy", container="my-ctr",
+        )
+        with patch.object(k8s_backend, "_kubectl", return_value="/bin/kubectl"):
+            with patch.object(k8s_backend.subprocess, "run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout=b"ok", stderr="")
+                k8s_backend.exec_(target, ["cat", "/safe/path"], check=False)
+                args = mock_run.call_args[0][0]
+                assert "-n" in args
+                ns_idx = args.index("-n")
+                assert args[ns_idx + 1] == "my-ns"
+                assert "deploy/my-deploy" in args
+                ctr_idx = args.index("-c")
+                assert args[ctr_idx + 1] == "my-ctr"
+                # -- separator before argv
+                dash_idx = args.index("--")
+                assert args[dash_idx + 1:] == ["cat", "/safe/path"]
+
+    def test_no_shell_true_in_any_call(self):
+        """subprocess.run must never be called with shell=True."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_kubectl", return_value="/bin/kubectl"):
+            with patch.object(k8s_backend.subprocess, "run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr="")
+                k8s_backend.pod_name(target)
+                k8s_backend.restart(target)
+                k8s_backend.rollout_status(target)
+                k8s_backend.exec_(target, ["cat", "/safe"], check=False)
+                for call in mock_run.call_args_list:
+                    assert call[1].get("shell", False) is False

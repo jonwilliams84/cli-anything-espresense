@@ -17,6 +17,14 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# ── Input validation ────────────────────────────────────────────────────────
+#
+# Every user-supplied value that reaches a kubectl or shell invocation is
+# validated against a strict allow-list *before* it is used.  This closes
+# the command/argument-injection surface: even though subprocess.run is
+# called with a list (never shell=True), a crafted value could still inject
+# extra kubectl flags or label selectors.  The validators below prevent that.
+
 # Safe pattern for Kubernetes resource names and file paths: alphanumeric,
 # slashes, dots, hyphens, underscores.  Rejects shell metacharacters and
 # null bytes that could be exploited in argument injection.
@@ -24,11 +32,56 @@ _VALID_PATH_RE = re.compile(r"^[\w./-]+\Z")
 
 
 def _check_path(label: str, value: str) -> str:
-    if not _VALID_PATH_RE.match(value):
+    """Validate a file path or resource name used in kubectl commands.
+
+    Rejects shell metacharacters, null bytes, and path-traversal sequences
+    (``..``) that could escape the intended directory or inject extra
+    kubectl arguments.
+    """
+    if not _VALID_PATH_RE.match(value) or ".." in value:
         raise ValueError(
             f"{label} contains unsafe characters (got {value!r}). "
             "Only alphanumeric characters, dots, hyphens, underscores, "
-            "and forward slashes are permitted."
+            "and forward slashes are permitted. Path traversal (..) is "
+            "not allowed."
+        )
+    return value
+
+
+# Safe pattern for kubectl --timeout values: one or more digits followed
+# by a single time-unit suffix (s, m, h).  Rejects anything that could be
+# interpreted as an additional kubectl flag or shell metacharacter.
+_VALID_TIMEOUT_RE = re.compile(r"^\d+[smh]\Z")
+
+
+def _check_timeout(label: str, value: str) -> str:
+    """Validate a kubectl --timeout duration string."""
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"{label} is not a valid duration (got {value!r}). "
+            "Expected a positive integer followed by 's', 'm', or 'h' "
+            "(e.g. '120s', '5m', '1h')."
+        )
+    return value
+
+
+def _check_argv_element(label: str, value: str) -> str:
+    """Validate a single element of an exec argv list.
+
+    Rejects values that start with ``-`` to prevent flag injection into
+    the kubectl command line (e.g. ``--namespace=evil``).  Empty strings
+    and strings containing null bytes or newlines are also rejected.
+    """
+    if not value:
+        raise ValueError(f"{label} must not be empty.")
+    if value.startswith("-"):
+        raise ValueError(
+            f"{label} must not start with '-' (got {value!r}); "
+            "this could be interpreted as a kubectl flag."
+        )
+    if "\x00" in value or "\n" in value:
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r})."
         )
     return value
 
@@ -83,7 +136,11 @@ def _run(
     check: bool = True,
     text: bool = True,
 ) -> subprocess.CompletedProcess:
-    """Run a kubectl command. Raises if it fails (when check=True)."""
+    """Run a kubectl command. Raises if it fails (when check=True).
+
+    Always uses a list of arguments — never ``shell=True`` — so no
+    unsanitised value can reach a shell.
+    """
     kc = _kubectl()
     proc = subprocess.run(
         [kc, *args],
@@ -117,7 +174,17 @@ def pod_name(target: K8sTarget) -> str:
 
 def exec_(target: K8sTarget, argv: list[str], *, stdin: Optional[str] = None,
           check: bool = True) -> subprocess.CompletedProcess:
-    """Run a command inside the companion container."""
+    """Run a command inside the companion container.
+
+    ``argv`` elements are validated individually to prevent flag injection.
+    The ``--`` separator is always inserted before ``argv`` so kubectl
+    treats them as positional arguments to the container command, not as
+    kubectl flags.
+    """
+    # Defence-in-depth: validate every argv element even though callers
+    # in this module use hardcoded commands.
+    for i, elem in enumerate(argv):
+        _check_argv_element(f"argv[{i}]", elem)
     args = [
         "-n", target.namespace,
         "exec",
@@ -170,6 +237,7 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    timeout = _check_timeout("timeout", timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",
