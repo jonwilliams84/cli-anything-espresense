@@ -6,11 +6,18 @@ shell out to `kubectl` — no in-process kube SDK dependency.
 
 All operations target a deployment by name in a namespace and operate on a
 specific container, with sane defaults for the upstream chart.
+
+Security: every user-supplied value is validated against a strict
+allow-list before it can reach a ``kubectl`` invocation or a command run
+inside the container.  No shell strings are ever constructed from
+untrusted input — all commands are passed as argument lists to
+``subprocess.run`` (never ``shell=True``).
 """
 
 from __future__ import annotations
 
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -31,6 +38,54 @@ def _check_path(label: str, value: str) -> str:
             "and forward slashes are permitted."
         )
     return value
+
+
+# Safe pattern for kubectl --timeout values: one or more digits followed by
+# an optional single time-unit suffix (s, m, or h).  Rejects anything that
+# could inject additional kubectl flags or arguments.
+_VALID_TIMEOUT_RE = re.compile(r"^\d+[smh]?\Z")
+
+
+def _check_timeout(label: str, value: str) -> str:
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Only a non-negative integer with an optional time-unit suffix "
+            "(s, m, or h) is permitted."
+        )
+    return value
+
+
+# Safe pattern for individual command/argument tokens passed to
+# ``kubectl exec ... -- <argv>``: alphanumeric plus a small set of
+# punctuation that appears in legitimate container commands (slashes for
+# paths, dots, hyphens, underscores, ``=`` for ``of=``/``--flag=value``
+# style args, ``+`` and ``%`` for ``date +%s``, colons).  Rejects every
+# shell metacharacter and null byte so a token can never be
+# re-interpreted as more than one argument or as a command separator.
+_VALID_ARGV_TOKEN_RE = re.compile(r"^[\w./+=:% -]+\Z")
+
+
+def _check_argv_token(label: str, value: str) -> str:
+    if not isinstance(value, str) or not _VALID_ARGV_TOKEN_RE.match(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Only alphanumeric characters, dots, hyphens, underscores, "
+            "forward slashes, colons, spaces, and the symbols = + % are "
+            "permitted in command arguments."
+        )
+    return value
+
+
+def _check_argv(label: str, argv: list[str]) -> list[str]:
+    """Validate every element of an argv list before it reaches kubectl."""
+    if not isinstance(argv, list) or not argv:
+        raise ValueError(
+            f"{label} must be a non-empty list of command arguments."
+        )
+    return [
+        _check_argv_token(f"{label}[{i}]", tok) for i, tok in enumerate(argv)
+    ]
 
 
 @dataclass(frozen=True)
@@ -83,7 +138,14 @@ def _run(
     check: bool = True,
     text: bool = True,
 ) -> subprocess.CompletedProcess:
-    """Run a kubectl command. Raises if it fails (when check=True)."""
+    """Run a kubectl command. Raises if it fails (when check=True).
+
+    ``args`` is always a list passed directly to ``subprocess.run`` — it is
+    never joined into a shell string for execution.  The only place the
+    arguments are rendered as a string is the failure message, and there
+    ``shlex.join`` is used so each token is safely quoted (preventing any
+    ambiguous shell-string reconstruction of untrusted input).
+    """
     kc = _kubectl()
     proc = subprocess.run(
         [kc, *args],
@@ -95,7 +157,8 @@ def _run(
     if check and proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
         raise RuntimeError(
-            f"kubectl {' '.join(args)} failed (exit {proc.returncode}): {stderr}"
+            f"kubectl {shlex.join(args)} failed "
+            f"(exit {proc.returncode}): {stderr}"
         )
     return proc
 
@@ -117,7 +180,15 @@ def pod_name(target: K8sTarget) -> str:
 
 def exec_(target: K8sTarget, argv: list[str], *, stdin: Optional[str] = None,
           check: bool = True) -> subprocess.CompletedProcess:
-    """Run a command inside the companion container."""
+    """Run a command inside the companion container.
+
+    Every element of ``argv`` is validated before it is placed on the
+    kubectl argument list so that no user-supplied token can inject extra
+    kubectl flags, command separators, or shell metacharacters.  The
+    ``--`` separator precedes ``argv`` so kubectl never interprets its
+    contents as options.
+    """
+    safe_argv = _check_argv("argv", argv)
     args = [
         "-n", target.namespace,
         "exec",
@@ -127,7 +198,7 @@ def exec_(target: K8sTarget, argv: list[str], *, stdin: Optional[str] = None,
     if stdin is not None:
         args.append("-i")
     args.append("--")
-    args.extend(argv)
+    args.extend(safe_argv)
     payload = stdin.encode("utf-8") if stdin is not None else None
     return _run(args, stdin=payload, check=check, text=False)
 
@@ -149,12 +220,18 @@ def write_config(target: K8sTarget, yaml_text: str, *, backup: bool = True) -> N
     ts_proc = exec_(target, ["date", "+%s"], check=True)
     ts = int(ts_proc.stdout.decode("utf-8").strip())
     bak_path = f"{target.config_path}.{ts}.bak"
+    # bak_path is derived from the already-validated config_path and an
+    # integer timestamp, but validate it too for defense in depth so the
+    # value is guaranteed safe before it reaches a container command.
+    _check_path("bak_path", bak_path)
     if backup:
         exec_(target, [
             "cp", target.config_path, bak_path,
         ], check=False)
     # tee-by-stdin pattern: feed the file content as stdin, write with `dd`
-    # so newlines and trailing whitespace are preserved verbatim.
+    # so newlines and trailing whitespace are preserved verbatim.  The
+    # destination path is a single validated argument, never interpolated
+    # into a shell string.
     exec_(target, [
         "dd", f"of={target.config_path}",
     ], stdin=yaml_text, check=True)
@@ -170,6 +247,7 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    _check_timeout("timeout", timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",
