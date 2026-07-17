@@ -33,6 +33,22 @@ def _check_path(label: str, value: str) -> str:
     return value
 
 
+# Safe pattern for kubectl --timeout values: digits followed by an optional
+# single-letter time unit (s, m, h).  Rejects shell metacharacters, spaces,
+# and any character that could break out of the --timeout= argument.
+_VALID_TIMEOUT_RE = re.compile(r"^\d+[smh]?\Z")
+
+
+def _check_timeout(label: str, value: str) -> str:
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Only a non-negative integer followed by an optional "
+            "time unit (s, m, h) is permitted."
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class K8sTarget:
     namespace: str = "espresense"
@@ -170,6 +186,7 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    timeout = _check_timeout("timeout", timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",
