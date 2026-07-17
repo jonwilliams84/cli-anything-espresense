@@ -17,18 +17,79 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-# Safe pattern for Kubernetes resource names and file paths: alphanumeric,
-# slashes, dots, hyphens, underscores.  Rejects shell metacharacters and
+# ---------------------------------------------------------------------------
+# Validation helpers
+#
+# Every user-supplied value that flows into a kubectl argument is validated
+# against a strict allow-list regex *before* it reaches subprocess.run.
+# No shell strings are ever built; all kubectl invocations use argument lists.
+# ---------------------------------------------------------------------------
+
+# Kubernetes namespace names must be a DNS-1123 label: lowercase
+# alphanumeric or hyphens, starting and ending with an alphanumeric
+# character, at most 63 characters.  This is the strictest of the name
+# patterns and is used for the ``-n`` flag in every kubectl call.
+_VALID_NAMESPACE_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?\Z")
+_MAX_NAME_LEN = 63
+
+# Kubernetes resource names (deployments, pods, etc.) follow the DNS-1123
+# subdomain rules: lowercase alphanumeric, hyphens, and dots, starting and
+# ending with an alphanumeric character, at most 253 characters.  We use the
+# stricter DNS-1123 label rules (no dots, max 63) for deployment and container
+# names because the upstream chart never uses dots in those fields and the
+# tighter bound closes more injection surface.
+_VALID_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?\Z")
+
+# Safe pattern for file paths inside the container: alphanumeric, slashes,
+# dots, hyphens, underscores.  Rejects shell metacharacters, spaces, and
 # null bytes that could be exploited in argument injection.
 _VALID_PATH_RE = re.compile(r"^[\w./-]+\Z")
 
+# Safe pattern for kubectl --timeout values: digits followed by an optional
+# single time-unit suffix (s, m, h).  Rejects shell metacharacters, spaces,
+# and anything that could be interpreted as an additional kubectl flag.
+_VALID_TIMEOUT_RE = re.compile(r"^\d+[smh]?\Z")
+
+
+def _check_namespace(value: str) -> str:
+    """Validate a Kubernetes namespace name (DNS-1123 label)."""
+    if not value or len(value) > _MAX_NAME_LEN or not _VALID_NAMESPACE_RE.match(value):
+        raise ValueError(
+            f"namespace contains unsafe characters (got {value!r}). "
+            "Only lowercase alphanumeric characters and hyphens are permitted, "
+            "starting and ending with an alphanumeric character (max 63 chars)."
+        )
+    return value
+
+
+def _check_name(label: str, value: str) -> str:
+    """Validate a Kubernetes resource name (DNS-1123 label)."""
+    if not value or len(value) > _MAX_NAME_LEN or not _VALID_NAME_RE.match(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Only lowercase alphanumeric characters and hyphens are permitted, "
+            "starting and ending with an alphanumeric character (max 63 chars)."
+        )
+    return value
+
 
 def _check_path(label: str, value: str) -> str:
+    """Validate a file path for use as a kubectl argument."""
     if not _VALID_PATH_RE.match(value):
         raise ValueError(
             f"{label} contains unsafe characters (got {value!r}). "
             "Only alphanumeric characters, dots, hyphens, underscores, "
             "and forward slashes are permitted."
+        )
+    return value
+
+
+def _check_timeout(value: str) -> str:
+    """Validate a kubectl --timeout value."""
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"timeout contains unsafe characters (got {value!r}). "
+            "Only digits with an optional 's', 'm', or 'h' suffix are permitted."
         )
     return value
 
@@ -42,21 +103,23 @@ class K8sTarget:
 
     def __post_init__(self) -> None:
         # Validate all user-supplied fields at construction time so every
-        # method is guaranteed to receive safe values.
+        # method is guaranteed to receive safe values.  Each field type has
+        # a dedicated validator that enforces the strictest applicable
+        # Kubernetes naming convention, preventing argument injection.
         object.__setattr__(
             self,
             "namespace",
-            _check_path("namespace", self.namespace),
+            _check_namespace(self.namespace),
         )
         object.__setattr__(
             self,
             "deployment",
-            _check_path("deployment", self.deployment),
+            _check_name("deployment", self.deployment),
         )
         object.__setattr__(
             self,
             "container",
-            _check_path("container", self.container),
+            _check_name("container", self.container),
         )
         object.__setattr__(
             self,
@@ -170,6 +233,7 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    timeout = _check_timeout(timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",
