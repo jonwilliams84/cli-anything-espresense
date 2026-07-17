@@ -22,6 +22,12 @@ from typing import Optional
 # null bytes that could be exploited in argument injection.
 _VALID_PATH_RE = re.compile(r"^[\w./-]+\Z")
 
+# Safe pattern for kubectl --timeout values: digits with an optional
+# single-letter unit suffix (s, m, h).  Rejects shell metacharacters,
+# additional flags, semicolons, and anything that could break out of the
+# --timeout= argument.
+_VALID_TIMEOUT_RE = re.compile(r"^\d+[smh]\Z")
+
 
 def _check_path(label: str, value: str) -> str:
     if not _VALID_PATH_RE.match(value):
@@ -31,6 +37,52 @@ def _check_path(label: str, value: str) -> str:
             "and forward slashes are permitted."
         )
     return value
+
+
+def _check_timeout(label: str, value: str) -> str:
+    """Validate a kubectl --timeout value to prevent argument injection.
+
+    Only a bare duration like ``120s``, ``5m``, or ``1h`` is permitted.
+    Anything containing spaces, semicolons, additional ``--flags``, or
+    other shell metacharacters is rejected.
+    """
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Only a non-negative integer followed by a single unit "
+            "(s, m, or h) is permitted, e.g. '120s', '5m', '1h'."
+        )
+    return value
+
+
+def _check_argv(label: str, argv: list[str]) -> list[str]:
+    """Validate every element of an argv list before it reaches kubectl.
+
+    Each element must be a non-empty string with no null bytes.  Elements
+    that look like kubectl flags (starting with ``-``) are rejected so a
+    malicious caller cannot inject additional options such as
+    ``--kubeconfig`` or ``--server`` even though the ``--`` separator in
+    ``exec_`` already provides a first line of defence.
+    """
+    if not isinstance(argv, list):
+        raise ValueError(
+            f"{label} must be a list of strings (got {type(argv).__name__})."
+        )
+    for elem in argv:
+        if not isinstance(elem, str):
+            raise ValueError(
+                f"{label} elements must be strings (got {type(elem).__name__})."
+            )
+        if "\x00" in elem:
+            raise ValueError(
+                f"{label} element contains a null byte (got {elem!r})."
+            )
+        if elem.startswith("-"):
+            raise ValueError(
+                f"{label} element looks like a flag and is not permitted "
+                f"(got {elem!r})."
+            )
+    return argv
 
 
 @dataclass(frozen=True)
@@ -84,6 +136,13 @@ def _run(
     text: bool = True,
 ) -> subprocess.CompletedProcess:
     """Run a kubectl command. Raises if it fails (when check=True)."""
+    # Defence-in-depth: reject null bytes in any argument so a value that
+    # slipped past an upstream validator can never reach the subprocess.
+    for a in args:
+        if isinstance(a, str) and "\x00" in a:
+            raise ValueError(
+                f"argument contains a null byte (got {a!r})."
+            )
     kc = _kubectl()
     proc = subprocess.run(
         [kc, *args],
@@ -118,6 +177,7 @@ def pod_name(target: K8sTarget) -> str:
 def exec_(target: K8sTarget, argv: list[str], *, stdin: Optional[str] = None,
           check: bool = True) -> subprocess.CompletedProcess:
     """Run a command inside the companion container."""
+    _check_argv("argv", argv)
     args = [
         "-n", target.namespace,
         "exec",
@@ -170,6 +230,7 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    _check_timeout("timeout", timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",

@@ -191,3 +191,160 @@ class TestRunListArgument:
                 # args must be a list
                 args = mock_run.call_args[0][0] if mock_run.call_args[0] else None
                 assert isinstance(args, list)
+
+
+# ── rollout_status timeout validation ───────────────────────────────────────
+
+class TestRolloutTimeoutValidation:
+    """The timeout parameter in rollout_status must be validated to prevent
+    argument injection via the --timeout= kubectl flag."""
+
+    @pytest.mark.parametrize(
+        "timeout",
+        [
+            "120s",
+            "5m",
+            "1h",
+            "0s",
+            "999s",
+            "30m",
+            "2h",
+        ],
+    )
+    def test_accepts_valid_timeout(self, timeout):
+        """Valid duration strings are accepted and passed through."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            k8s_backend.rollout_status(target, timeout=timeout)
+            args = mock_run.call_args[0][0]
+            timeout_arg = next(a for a in args if a.startswith("--timeout="))
+            assert timeout_arg == f"--timeout={timeout}"
+
+    @pytest.mark.parametrize(
+        "timeout",
+        [
+            # Shell command injection
+            "120s;rm -rf /",
+            "120s && id",
+            "120s | cat",
+            "120s\nexit 1\n",
+            "120s$(id)",
+            "120s`id`",
+            "120s&sleep 10",
+            # Additional kubectl flag injection
+            "120s --some-flag",
+            "--timeout=5s",
+            "120s --namespace=evil",
+            # Invalid formats
+            "120",
+            "120x",
+            "",
+            " 120s",
+            "120s ",
+            '120s"',
+            "120s\x00",
+        ],
+    )
+    def test_rejects_unsafe_timeout(self, timeout):
+        """Unsafe timeout values must raise ValueError before reaching kubectl."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            with pytest.raises(ValueError, match=r"contains unsafe characters"):
+                k8s_backend.rollout_status(target, timeout=timeout)
+            # _run must never be called with an unsafe timeout
+            mock_run.assert_not_called()
+
+    def test_default_timeout_is_valid(self):
+        """The default timeout of '120s' must pass validation."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            k8s_backend.rollout_status(target)
+            args = mock_run.call_args[0][0]
+            timeout_arg = next(a for a in args if a.startswith("--timeout="))
+            assert timeout_arg == "--timeout=120s"
+
+
+# ── exec_ argv validation (argument injection) ──────────────────────────────
+
+class TestExecArgvValidation:
+    """The argv passed to exec_ is user-supplied and must be validated so
+    that no element can inject kubectl flags or smuggle null bytes past the
+    ``--`` separator."""
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            # Flag injection — elements that look like kubectl options
+            ["--kubeconfig=/evil"],
+            ["--server=https://evil"],
+            ["-n", "evil"],
+            ["cat", "--namespace=evil"],
+            ["cat", "-c", "rm -rf /"],
+            # Null byte smuggling
+            ["cat\x00/evil"],
+            ["cat", "/path\x00null"],
+            # Non-string elements
+            [123],
+            ["cat", None],
+        ],
+    )
+    def test_rejects_unsafe_argv(self, argv):
+        """Unsafe argv elements must raise ValueError before _run is called."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            with pytest.raises(ValueError):
+                k8s_backend.exec_(target, argv, check=False)
+            mock_run.assert_not_called()
+
+    def test_rejects_non_list_argv(self):
+        """A non-list argv (e.g. a string) must be rejected."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            with pytest.raises(ValueError, match=r"must be a list"):
+                k8s_backend.exec_(target, "cat /etc/passwd", check=False)
+            mock_run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["cat", "/config/espresense/config.yaml"],
+            ["date", "+%s"],
+            ["cp", "/config/espresense/config.yaml", "/tmp/bak"],
+            ["dd", "of=/config/espresense/config.yaml"],
+            ["echo", "hello world"],
+        ],
+    )
+    def test_accepts_safe_argv(self, argv):
+        """Legitimate argv lists are accepted and passed through to _run."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=b"", returncode=0)
+            k8s_backend.exec_(target, argv, check=False)
+            args_list = mock_run.call_args[0][0]
+            dash_idx = args_list.index("--")
+            assert args_list[dash_idx + 1:] == argv
+
+
+# ── _run defence-in-depth: null bytes never reach subprocess ────────────────
+
+class TestRunNullByteDefence:
+    """_run must reject null bytes in any argument as a backstop, even if an
+    upstream validator missed them."""
+
+    def test_run_rejects_null_byte_in_args(self):
+        """A null byte in any _run argument must raise before subprocess.run."""
+        with patch.object(k8s_backend, "_kubectl", return_value="/bin/kubectl"):
+            with patch.object(k8s_backend.subprocess, "run") as mock_run:
+                with pytest.raises(ValueError, match=r"null byte"):
+                    k8s_backend._run(["get", "pods\x00evil"])
+                mock_run.assert_not_called()
+
+    def test_run_accepts_clean_args(self):
+        """Normal arguments without null bytes are passed through."""
+        with patch.object(k8s_backend, "_kubectl", return_value="/bin/kubectl"):
+            with patch.object(k8s_backend.subprocess, "run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                k8s_backend._run(["get", "pods"])
+                mock_run.assert_called_once()
