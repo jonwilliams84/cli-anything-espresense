@@ -191,3 +191,227 @@ class TestRunListArgument:
                 # args must be a list
                 args = mock_run.call_args[0][0] if mock_run.call_args[0] else None
                 assert isinstance(args, list)
+
+
+# ── rollout_status timeout validation ───────────────────────────────────────
+
+class TestRolloutTimeoutValidation:
+    """The user-supplied --timeout value must be validated before reaching kubectl."""
+
+    @pytest.mark.parametrize(
+        "timeout",
+        [
+            # Shell metacharacters / command separators
+            "120s; rm -rf /",
+            "120s && id",
+            "120s | cat",
+            "120s\n",
+            # Argument injection via additional kubectl flags
+            "120s --kubeconfig=/tmp/evil",
+            "120s --namespace=evil",
+            "120s -o json",
+            # Command substitution
+            "120s$(id)",
+            "120s`id`",
+            # Null bytes and spaces
+            "120s\x00",
+            "120 s",
+            " 120s",
+            "120s ",
+            # Missing or invalid unit suffix
+            "120",
+            "120x",
+            "120seconds",
+            "abc",
+            "",
+            "-1s",
+        ],
+    )
+    def test_rejects_unsafe_timeout(self, timeout):
+        """Unsafe timeout values must raise ValueError before kubectl is called."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            with pytest.raises(ValueError, match=r"contains unsafe characters"):
+                k8s_backend.rollout_status(target, timeout=timeout)
+            mock_run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "timeout",
+        [
+            "120s",
+            "5m",
+            "1h",
+            "30s",
+            "10m",
+            "2h",
+            "0s",
+        ],
+    )
+    def test_accepts_valid_timeout(self, timeout):
+        """Valid timeout values must be passed through to kubectl."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            k8s_backend.rollout_status(target, timeout=timeout)
+            args = mock_run.call_args[0][0]
+            timeout_arg = next(a for a in args if a.startswith("--timeout="))
+            assert timeout_arg == f"--timeout={timeout}"
+
+    def test_default_timeout_is_valid(self):
+        """The default timeout of '120s' must pass validation."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            k8s_backend.rollout_status(target)
+            args = mock_run.call_args[0][0]
+            assert "--timeout=120s" in args
+
+
+# ── _run argument-level sanitisation (defence-in-depth) ──────────────────────
+
+class TestRunArgSanitisation:
+    """_run must reject any argument containing shell metacharacters.
+
+    These tests verify the defence-in-depth chokepoint in _run: even if a
+    caller bypasses K8sTarget construction validation and passes unsanitised
+    values directly to _run, the arguments are rejected before they reach
+    subprocess.run.
+    """
+
+    @pytest.mark.parametrize(
+        "arg",
+        [
+            # Command separators
+            "ns;sleep 10",
+            "ns && id",
+            "ns | cat",
+            "ns\n",
+            # Command substitution
+            "deploy$(id)",
+            "deploy`id`",
+            # Null bytes
+            "ns\x00",
+            "config\x00null",
+            # Whitespace (could enable argument splitting)
+            "ns evil",
+            "ns\t",
+            # Glob characters
+            "ns*",
+            "ns?",
+            "ns~",
+            # History expansion
+            "ns!",
+            # Redirection
+            "ns>file",
+            "ns<file",
+            # Quotes
+            'ns"$(id)"',
+            "ns'$(id)'",
+            # Backslash
+            "ns\\id",
+            # Parentheses
+            "ns(id)",
+            # Dollar sign
+            "ns$HOME",
+        ],
+    )
+    def test_run_rejects_unsafe_arg(self, arg):
+        """_run must raise ValueError for any argument with shell metacharacters."""
+        with patch.object(k8s_backend, "_kubectl", return_value="/bin/kubectl"):
+            with patch.object(k8s_backend.subprocess, "run") as mock_run:
+                with pytest.raises(ValueError, match=r"contains unsafe characters"):
+                    k8s_backend._run(["-n", arg, "get", "pods"])
+                mock_run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            # Normal kubectl args
+            ["-n", "espresense", "get", "pods"],
+            # jsonpath with kubectl syntax chars
+            ["-o", "jsonpath={.items[0].metadata.name}"],
+            # Label selector with = and {}
+            ["-l", "app=espresense-companion"],
+            # deploy/ prefix
+            ["exec", "deploy/espresense-companion", "-c", "ctr"],
+            # --timeout flag
+            ["rollout", "status", "deployment/foo", "--timeout=120s"],
+            # date format
+            ["date", "+%s"],
+            # dd of= pattern
+            ["dd", "of=/config/espresense/config.yaml"],
+            # cp with backup path
+            ["cp", "/config/espresense/config.yaml.1700000000.bak"],
+            # -- separator
+            ["exec", "deploy/foo", "--", "cat", "/path/to/config.yaml"],
+        ],
+    )
+    def test_run_accepts_safe_args(self, args):
+        """_run must accept known-safe kubectl argument patterns."""
+        with patch.object(k8s_backend, "_kubectl", return_value="/bin/kubectl"):
+            with patch.object(k8s_backend.subprocess, "run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                k8s_backend._run(args)
+                mock_run.assert_called_once()
+
+    def test_sanitise_args_validates_every_element(self):
+        """_sanitise_args must check every element, not just the first."""
+        with pytest.raises(ValueError, match=r"args\[3\]"):
+            k8s_backend._sanitise_args([
+                "-n", "safe", "get", "pods; rm -rf /",
+            ])
+
+    def test_run_passes_sanitised_args_to_subprocess(self):
+        """The args list passed to subprocess.run must be the sanitised copy."""
+        with patch.object(k8s_backend, "_kubectl", return_value="/bin/kubectl"):
+            with patch.object(k8s_backend.subprocess, "run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                k8s_backend._run(["-n", "espresense", "get", "pods"])
+                call_args = mock_run.call_args[0][0]
+                assert call_args == ["/bin/kubectl", "-n", "espresense", "get", "pods"]
+
+    def test_run_rejects_non_string_arg(self):
+        """_run must reject non-string arguments."""
+        with patch.object(k8s_backend, "_kubectl", return_value="/bin/kubectl"):
+            with pytest.raises(TypeError, match=r"must be a string"):
+                k8s_backend._run(["-n", 123, "get", "pods"])
+
+
+# ── Defence-in-depth: _run catches values that bypass K8sTarget ──────────────
+
+class TestDefenceInDepth:
+    """_run must catch unsanitised values even if K8sTarget is bypassed.
+
+    These tests simulate a scenario where a caller constructs args manually
+    (bypassing K8sTarget validation) and passes them to _run.  The _run
+    chokepoint must still reject dangerous values.
+    """
+
+    @pytest.mark.parametrize(
+        "fn_name,build_args",
+        [
+            # pod_name builds: -n <namespace> ... -l app=<deployment> ...
+            ("pod_name", lambda: [
+                "-n", "ns; rm -rf /", "get", "pods",
+                "-l", "app=safe", "-o", "jsonpath={.items[0].metadata.name}",
+            ]),
+            ("pod_name", lambda: [
+                "-n", "safe", "get", "pods",
+                "-l", "app=deploy; id", "-o", "jsonpath={.items[0].metadata.name}",
+            ]),
+            # restart builds: -n <namespace> rollout restart deployment/<deployment>
+            ("restart", lambda: [
+                "-n", "ns && id", "rollout", "restart", "deployment/safe",
+            ]),
+            ("restart", lambda: [
+                "-n", "safe", "rollout", "restart", "deployment/evil; cat /etc/passwd",
+            ]),
+        ],
+    )
+    def test_run_catches_bypassed_k8starget(self, fn_name, build_args):
+        """Even if args are built manually, _run rejects dangerous values."""
+        with patch.object(k8s_backend, "_kubectl", return_value="/bin/kubectl"):
+            with patch.object(k8s_backend.subprocess, "run") as mock_run:
+                with pytest.raises(ValueError, match=r"contains unsafe characters"):
+                    k8s_backend._run(build_args())
+                mock_run.assert_not_called()

@@ -22,6 +22,26 @@ from typing import Optional
 # null bytes that could be exploited in argument injection.
 _VALID_PATH_RE = re.compile(r"^[\w./-]+\Z")
 
+# Safe pattern for kubectl --timeout values: digits followed by a single
+# time-unit suffix (s, m, h).  Rejects shell metacharacters, spaces, and
+# any character that could break out of the --timeout=<value> argument.
+_VALID_TIMEOUT_RE = re.compile(r"^\d+[smh]\Z")
+
+# Characters that must never appear in a kubectl argument value.  This
+# denylist covers shell metacharacters (``; | & $ \` ( ) < > " ' \\``),
+# whitespace, null bytes, glob characters (``* ? ~``), and the ``!`` history
+# expansion character.  These could enable command injection or argument
+# injection if they reached ``subprocess.run``.
+#
+# Note: ``subprocess.run`` is called with a list (never ``shell=True``), so
+# shell metacharacters are inert in practice.  This denylist is
+# defence-in-depth: it ensures that even if a future code path accidentally
+# uses ``shell=True`` or joins args into a string, the dangerous characters
+# are already rejected.
+_UNSAFE_ARG_CHARS_RE = re.compile(
+    r"[;&|$`\\()<>\"'!~*?\s\x00]"
+)
+
 
 def _check_path(label: str, value: str) -> str:
     if not _VALID_PATH_RE.match(value):
@@ -31,6 +51,55 @@ def _check_path(label: str, value: str) -> str:
             "and forward slashes are permitted."
         )
     return value
+
+
+def _check_timeout(label: str, value: str) -> str:
+    """Validate a kubectl --timeout value (e.g. ``120s``, ``5m``, ``1h``).
+
+    Only digits followed by a single time-unit suffix are accepted.  This
+    prevents argument injection through the ``--timeout=<value>`` argument
+    that ``rollout_status`` passes to kubectl.
+    """
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Only a positive integer followed by 's', 'm', or 'h' is "
+            "permitted (e.g. '120s', '5m', '1h')."
+        )
+    return value
+
+
+def _check_arg(label: str, value: str) -> str:
+    """Validate a single kubectl argument value for dangerous characters.
+
+    This is the defence-in-depth chokepoint used by ``_run``: every
+    argument is checked for shell metacharacters, whitespace, and null
+    bytes before it reaches ``subprocess.run``.  Kubectl-specific syntax
+    characters (``=``, ``{``, ``}``, ``[``, ``]``, ``%``, ``+``) are allowed
+    because they appear in known-safe argument patterns such as
+    ``jsonpath={.items[0].metadata.name}`` and ``--timeout=120s``.
+    """
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{label} must be a string, got {type(value).__name__}"
+        )
+    if _UNSAFE_ARG_CHARS_RE.search(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Shell metacharacters, whitespace, and null bytes are not "
+            "permitted in kubectl arguments."
+        )
+    return value
+
+
+def _sanitise_args(args: list[str]) -> list[str]:
+    """Validate every argument before it reaches ``subprocess.run``.
+
+    This ensures that no user-supplied value — even one that bypasses
+    ``K8sTarget`` construction validation — can inject shell
+    metacharacters or additional kubectl flags.
+    """
+    return [_check_arg(f"args[{i}]", a) for i, a in enumerate(args)]
 
 
 @dataclass(frozen=True)
@@ -83,10 +152,16 @@ def _run(
     check: bool = True,
     text: bool = True,
 ) -> subprocess.CompletedProcess:
-    """Run a kubectl command. Raises if it fails (when check=True)."""
+    """Run a kubectl command. Raises if it fails (when check=True).
+
+    Every argument is validated by ``_sanitise_args`` before it reaches
+    ``subprocess.run`` so that no user-supplied value can inject shell
+    metacharacters or additional kubectl flags.
+    """
+    safe_args = _sanitise_args(args)
     kc = _kubectl()
     proc = subprocess.run(
-        [kc, *args],
+        [kc, *safe_args],
         input=stdin,
         capture_output=True,
         text=text,
@@ -95,7 +170,7 @@ def _run(
     if check and proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
         raise RuntimeError(
-            f"kubectl {' '.join(args)} failed (exit {proc.returncode}): {stderr}"
+            f"kubectl {' '.join(safe_args)} failed (exit {proc.returncode}): {stderr}"
         )
     return proc
 
@@ -170,6 +245,9 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    # Validate the user-supplied timeout before it reaches kubectl so it
+    # cannot inject additional arguments via the --timeout=<value> flag.
+    _check_timeout("timeout", timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",
