@@ -33,6 +33,51 @@ def _check_path(label: str, value: str) -> str:
     return value
 
 
+# Safe pattern for kubectl --timeout values: digits followed by an optional
+# single time-unit suffix (s, m, h).  Rejects shell metacharacters, spaces,
+# and any characters that could be used for argument injection.
+_VALID_TIMEOUT_RE = re.compile(r"^\d+[smh]?$\Z")
+
+
+def _check_timeout(value: str) -> str:
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"timeout contains unsafe characters (got {value!r}). "
+            "Only digits with an optional single time-unit suffix "
+            "(s, m, or h) are permitted."
+        )
+    return value
+
+
+# Characters that are dangerous in any argument passed to a subprocess:
+# shell metacharacters, command separators, newlines, null bytes, and
+# backticks/dollar-signs used for command substitution.  This is a
+# defence-in-depth check applied at the _run gateway so that no
+# unsanitised value can ever reach kubectl or a shell invocation.
+_UNSAFE_ARG_RE = re.compile(r"[;&|`$()\n\r\0]")
+
+
+def _check_arg(label: str, value: str) -> str:
+    """Reject any argument containing shell metacharacters or control chars.
+
+    This is the last line of defence before ``subprocess.run``.  Even though
+    ``subprocess.run`` is called with a list (never ``shell=True``), an
+    argument containing newlines or embedded null bytes could still be
+    misinterpreted by kubectl or the in-container shell.  Every value that
+    reaches ``_run`` must pass this check.
+    """
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{label} must be a string (got {type(value).__name__})"
+        )
+    if _UNSAFE_ARG_RE.search(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Shell metacharacters, newlines, and null bytes are not permitted."
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class K8sTarget:
     namespace: str = "espresense"
@@ -83,10 +128,16 @@ def _run(
     check: bool = True,
     text: bool = True,
 ) -> subprocess.CompletedProcess:
-    """Run a kubectl command. Raises if it fails (when check=True)."""
+    """Run a kubectl command. Raises if it fails (when check=True).
+
+    Every argument is sanitised through ``_check_arg`` before it reaches
+    ``subprocess.run`` so that no unsanitised user-supplied value can
+    ever be passed to kubectl or a shell invocation.
+    """
+    safe_args = [_check_arg(f"args[{i}]", a) for i, a in enumerate(args)]
     kc = _kubectl()
     proc = subprocess.run(
-        [kc, *args],
+        [kc, *safe_args],
         input=stdin,
         capture_output=True,
         text=text,
@@ -95,7 +146,7 @@ def _run(
     if check and proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
         raise RuntimeError(
-            f"kubectl {' '.join(args)} failed (exit {proc.returncode}): {stderr}"
+            f"kubectl {' '.join(safe_args)} failed (exit {proc.returncode}): {stderr}"
         )
     return proc
 
@@ -117,7 +168,13 @@ def pod_name(target: K8sTarget) -> str:
 
 def exec_(target: K8sTarget, argv: list[str], *, stdin: Optional[str] = None,
           check: bool = True) -> subprocess.CompletedProcess:
-    """Run a command inside the companion container."""
+    """Run a command inside the companion container.
+
+    Every element of *argv* is sanitised through ``_check_arg`` before it
+    is passed to ``_run`` so that argument injection via the command or
+    its arguments is impossible.
+    """
+    safe_argv = [_check_arg(f"argv[{i}]", a) for i, a in enumerate(argv)]
     args = [
         "-n", target.namespace,
         "exec",
@@ -127,7 +184,7 @@ def exec_(target: K8sTarget, argv: list[str], *, stdin: Optional[str] = None,
     if stdin is not None:
         args.append("-i")
     args.append("--")
-    args.extend(argv)
+    args.extend(safe_argv)
     payload = stdin.encode("utf-8") if stdin is not None else None
     return _run(args, stdin=payload, check=check, text=False)
 
@@ -170,6 +227,7 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    timeout = _check_timeout(timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",
