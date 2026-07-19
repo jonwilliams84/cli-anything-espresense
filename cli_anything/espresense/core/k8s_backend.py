@@ -33,6 +33,28 @@ def _check_path(label: str, value: str) -> str:
     return value
 
 
+# Safe pattern for a kubectl --timeout value: an optional integer count
+# followed by a single time-unit suffix (s, m, h).  Rejects anything that
+# could be interpreted as an additional kubectl flag or shell metacharacter.
+_VALID_TIMEOUT_RE = re.compile(r"^\d+[smh]\Z")
+
+
+def _check_timeout(value: str) -> str:
+    """Validate a kubectl rollout --timeout value.
+
+    kubectl accepts values like ``120s``, ``5m``, or ``1h``.  Anything else
+    (including additional ``--flags``, spaces, or shell metacharacters) is
+    rejected to prevent argument injection.
+    """
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"timeout contains unsafe characters (got {value!r}). "
+            "Only a positive integer followed by a single time-unit "
+            "suffix (s, m, or h) is permitted, e.g. '120s' or '5m'."
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class K8sTarget:
     namespace: str = "espresense"
@@ -102,10 +124,15 @@ def _run(
 
 def pod_name(target: K8sTarget) -> str:
     """Resolve the running pod for the deployment."""
+    # Defence-in-depth: re-validate user-supplied values at the point of
+    # use so they can never reach _run unsanitised, even if a caller
+    # bypassed K8sTarget.__post_init__.
+    namespace = _check_path("namespace", target.namespace)
+    deployment = _check_path("deployment", target.deployment)
     proc = _run([
-        "-n", target.namespace,
+        "-n", namespace,
         "get", "pods",
-        "-l", f"app={target.deployment}",
+        "-l", f"app={deployment}",
         "-o", "jsonpath={.items[0].metadata.name}",
     ])
     name = (proc.stdout or "").strip()
@@ -118,11 +145,17 @@ def pod_name(target: K8sTarget) -> str:
 def exec_(target: K8sTarget, argv: list[str], *, stdin: Optional[str] = None,
           check: bool = True) -> subprocess.CompletedProcess:
     """Run a command inside the companion container."""
+    # Defence-in-depth: re-validate user-supplied values at the point of
+    # use so they can never reach _run unsanitised, even if a caller
+    # bypassed K8sTarget.__post_init__.
+    namespace = _check_path("namespace", target.namespace)
+    deployment = _check_path("deployment", target.deployment)
+    container = _check_path("container", target.container)
     args = [
-        "-n", target.namespace,
+        "-n", namespace,
         "exec",
-        f"deploy/{target.deployment}",
-        "-c", target.container,
+        f"deploy/{deployment}",
+        "-c", container,
     ]
     if stdin is not None:
         args.append("-i")
@@ -134,7 +167,8 @@ def exec_(target: K8sTarget, argv: list[str], *, stdin: Optional[str] = None,
 
 def read_config(target: K8sTarget) -> str:
     """Read the companion's YAML config file out of the running pod."""
-    proc = exec_(target, ["cat", target.config_path], check=True)
+    config_path = _check_path("config_path", target.config_path)
+    proc = exec_(target, ["cat", config_path], check=True)
     return proc.stdout.decode("utf-8")
 
 
@@ -144,36 +178,49 @@ def write_config(target: K8sTarget, yaml_text: str, *, backup: bool = True) -> N
     When backup=True, a timestamped copy of the existing file is left at
     <path>.<unix-ts>.bak before the overwrite, so the change is reversible.
     """
+    # Defence-in-depth: re-validate config_path at the point of use.
+    config_path = _check_path("config_path", target.config_path)
     # Generate the timestamp inside the pod so the backup file reflects the
     # pod's clock, not the host's.
     ts_proc = exec_(target, ["date", "+%s"], check=True)
     ts = int(ts_proc.stdout.decode("utf-8").strip())
-    bak_path = f"{target.config_path}.{ts}.bak"
+    bak_path = f"{config_path}.{ts}.bak"
     if backup:
         exec_(target, [
-            "cp", target.config_path, bak_path,
+            "cp", config_path, bak_path,
         ], check=False)
     # tee-by-stdin pattern: feed the file content as stdin, write with `dd`
     # so newlines and trailing whitespace are preserved verbatim.
     exec_(target, [
-        "dd", f"of={target.config_path}",
+        "dd", f"of={config_path}",
     ], stdin=yaml_text, check=True)
 
 
 def restart(target: K8sTarget) -> None:
     """Trigger a rolling restart of the companion deployment."""
+    # Defence-in-depth: re-validate user-supplied values at the point of
+    # use so they can never reach _run unsanitised, even if a caller
+    # bypassed K8sTarget.__post_init__.
+    namespace = _check_path("namespace", target.namespace)
+    deployment = _check_path("deployment", target.deployment)
     _run([
-        "-n", target.namespace,
+        "-n", namespace,
         "rollout", "restart",
-        f"deployment/{target.deployment}",
+        f"deployment/{deployment}",
     ], check=True)
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    safe_timeout = _check_timeout(timeout)
+    # Defence-in-depth: re-validate user-supplied values at the point of
+    # use so they can never reach _run unsanitised, even if a caller
+    # bypassed K8sTarget.__post_init__.
+    namespace = _check_path("namespace", target.namespace)
+    deployment = _check_path("deployment", target.deployment)
     proc = _run([
-        "-n", target.namespace,
+        "-n", namespace,
         "rollout", "status",
-        f"deployment/{target.deployment}",
-        f"--timeout={timeout}",
+        f"deployment/{deployment}",
+        f"--timeout={safe_timeout}",
     ], check=False)
     return (proc.stdout or "") + (proc.stderr or "")
