@@ -191,3 +191,95 @@ class TestRunListArgument:
                 # args must be a list
                 args = mock_run.call_args[0][0] if mock_run.call_args[0] else None
                 assert isinstance(args, list)
+
+
+# ── rollout_status timeout validation ─────────────────────────────────────────
+
+class TestRolloutTimeoutValidation:
+    """The --timeout parameter is user-supplied and must be sanitised before
+    it reaches a kubectl argument so that argument injection is impossible."""
+
+    @pytest.mark.parametrize(
+        "timeout",
+        [
+            # Shell command separators
+            "120s; rm -rf /",
+            "120s && id",
+            "120s | cat",
+            "120s\n",
+            "120s\x00",
+            # Argument injection via additional flags
+            "120s --namespace=evil",
+            "120s --insecure-skip-tls-verify",
+            "--namespace=evil",
+            # Shell substitution
+            "120s$(id)",
+            "120s`id`",
+            # Empty / whitespace
+            "",
+            " ",
+            # Non-time strings
+            "abc",
+            "12.5s",
+            "-1s",
+        ],
+    )
+    def test_rejects_unsafe_timeout(self, timeout):
+        """Unsafe timeout values must raise ValueError before kubectl runs."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="", stderr="")
+            with pytest.raises(ValueError, match=r"contains unsafe characters"):
+                k8s_backend.rollout_status(target, timeout=timeout)
+            mock_run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "timeout",
+        [
+            "120s",
+            "0s",
+            "5m",
+            "1h",
+            "30s",
+            "3600s",
+            "90m",
+            "2h",
+            "300",
+        ],
+    )
+    def test_accepts_valid_timeout(self, timeout):
+        """Valid timeout values must be passed through to kubectl unchanged."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="ok", stderr="")
+            k8s_backend.rollout_status(target, timeout=timeout)
+            args_list = mock_run.call_args[0][0]
+            timeout_arg = next(
+                a for a in args_list if a.startswith("--timeout=")
+            )
+            assert timeout_arg == f"--timeout={timeout}"
+
+    def test_default_timeout_is_valid(self):
+        """The default timeout of 120s must pass validation."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="ok", stderr="")
+            k8s_backend.rollout_status(target)
+            args_list = mock_run.call_args[0][0]
+            timeout_arg = next(
+                a for a in args_list if a.startswith("--timeout=")
+            )
+            assert timeout_arg == "--timeout=120s"
+
+    def test_safe_timeout_reaches_kubectl_unchanged(self):
+        """A validated timeout must appear verbatim in the kubectl arg list."""
+        target = k8s_backend.K8sTarget()
+        with patch.object(k8s_backend, "_run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="done", stderr="")
+            k8s_backend.rollout_status(target, timeout="5m")
+            args_list = mock_run.call_args[0][0]
+            assert "--timeout=5m" in args_list
+            # Ensure no extra arguments were injected
+            assert all(
+                not a.startswith("--namespace=") for a in args_list
+            )
