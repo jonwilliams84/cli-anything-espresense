@@ -33,6 +33,22 @@ def _check_path(label: str, value: str) -> str:
     return value
 
 
+# Safe pattern for kubectl --timeout values: one or more digits followed by
+# an optional single-character time unit (s, m, h).  Rejects shell
+# metacharacters, spaces, and anything that could inject additional flags.
+_VALID_TIMEOUT_RE = re.compile(r"^\d+[smh]?\Z")
+
+
+def _check_timeout(label: str, value: str) -> str:
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Only a non-negative integer with an optional time-unit "
+            "suffix (s, m, h) is permitted."
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class K8sTarget:
     namespace: str = "espresense"
@@ -63,6 +79,23 @@ class K8sTarget:
             "config_path",
             _check_path("config_path", self.config_path),
         )
+
+
+def _validate_target(target: K8sTarget) -> K8sTarget:
+    """Re-validate every user-supplied field on *target* before it reaches
+    a kubectl invocation.
+
+    ``K8sTarget.__post_init__`` already validates at construction time, but
+    this defence-in-depth check ensures that no unsanitised value can reach
+    ``_run`` even if a caller bypasses the dataclass constructor (e.g. via
+    ``object.__new__`` or by mutating a frozen instance with
+    ``object.__setattr__``).
+    """
+    _check_path("namespace", target.namespace)
+    _check_path("deployment", target.deployment)
+    _check_path("container", target.container)
+    _check_path("config_path", target.config_path)
+    return target
 
 
 def _kubectl() -> str:
@@ -100,8 +133,20 @@ def _run(
     return proc
 
 
+# Safe pattern for Kubernetes pod names: DNS-label style — alphanumeric
+# and hyphens only.  Rejects shell metacharacters, spaces, and null bytes
+# that could be exploited if the value is reused in a subsequent kubectl
+# invocation.
+_VALID_POD_NAME_RE = re.compile(r"^[a-zA-Z0-9-]+\Z")
+
+
 def pod_name(target: K8sTarget) -> str:
-    """Resolve the running pod for the deployment."""
+    """Resolve the running pod for the deployment.
+
+    The returned name is validated against a strict pod-name pattern so
+    that it is safe to reuse in subsequent kubectl calls.
+    """
+    _validate_target(target)
     proc = _run([
         "-n", target.namespace,
         "get", "pods",
@@ -112,12 +157,18 @@ def pod_name(target: K8sTarget) -> str:
     if not name:
         # fall back: deploy/<name> targeting
         return ""
+    if not _VALID_POD_NAME_RE.match(name):
+        raise ValueError(
+            f"pod name contains unsafe characters (got {name!r}). "
+            "Only alphanumeric characters and hyphens are permitted."
+        )
     return name
 
 
 def exec_(target: K8sTarget, argv: list[str], *, stdin: Optional[str] = None,
           check: bool = True) -> subprocess.CompletedProcess:
     """Run a command inside the companion container."""
+    _validate_target(target)
     args = [
         "-n", target.namespace,
         "exec",
@@ -162,6 +213,7 @@ def write_config(target: K8sTarget, yaml_text: str, *, backup: bool = True) -> N
 
 def restart(target: K8sTarget) -> None:
     """Trigger a rolling restart of the companion deployment."""
+    _validate_target(target)
     _run([
         "-n", target.namespace,
         "rollout", "restart",
@@ -170,6 +222,8 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    _validate_target(target)
+    _check_timeout("timeout", timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",
