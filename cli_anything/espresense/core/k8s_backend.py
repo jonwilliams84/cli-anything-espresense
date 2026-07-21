@@ -22,6 +22,14 @@ from typing import Optional
 # null bytes that could be exploited in argument injection.
 _VALID_PATH_RE = re.compile(r"^[\w./-]+\Z")
 
+# Safe pattern for a kubectl --timeout value: a Go duration string such as
+# "120s", "5m", "1h30m", "500ms".  Only digits and the unit suffixes
+# recognised by Go's time.ParseDuration are permitted — no spaces, shell
+# metacharacters, or additional flags.
+_VALID_TIMEOUT_RE = re.compile(
+    r"^(?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h))+\Z"
+)
+
 
 def _check_path(label: str, value: str) -> str:
     if not _VALID_PATH_RE.match(value):
@@ -29,6 +37,16 @@ def _check_path(label: str, value: str) -> str:
             f"{label} contains unsafe characters (got {value!r}). "
             "Only alphanumeric characters, dots, hyphens, underscores, "
             "and forward slashes are permitted."
+        )
+    return value
+
+
+def _check_timeout(label: str, value: str) -> str:
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"{label} contains unsafe characters (got {value!r}). "
+            "Only a Go duration string (e.g. '120s', '5m', '1h30m') "
+            "is permitted."
         )
     return value
 
@@ -170,6 +188,9 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    # Validate the user-supplied timeout before it reaches kubectl so a
+    # malicious value cannot inject additional arguments.
+    _check_timeout("timeout", timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",
