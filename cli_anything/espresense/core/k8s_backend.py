@@ -33,6 +33,23 @@ def _check_path(label: str, value: str) -> str:
     return value
 
 
+# Safe pattern for kubectl duration strings (e.g. "120s", "5m", "1h",
+# "90s").  Allows digits followed by a single time-unit suffix.  Rejects
+# shell metacharacters, whitespace, and anything that could inject
+# additional kubectl flags or arguments.
+_VALID_TIMEOUT_RE = re.compile(r"^\d+[smh]\Z")
+
+
+def _check_timeout(label: str, value: str) -> str:
+    if not _VALID_TIMEOUT_RE.match(value):
+        raise ValueError(
+            f"{label} contains unsafe or invalid characters (got {value!r}). "
+            "Only a positive integer followed by a single time-unit suffix "
+            "(s, m, or h) is permitted, e.g. '120s' or '5m'."
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class K8sTarget:
     namespace: str = "espresense"
@@ -170,6 +187,9 @@ def restart(target: K8sTarget) -> None:
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
+    # Validate the user-supplied timeout before it reaches kubectl so a
+    # malicious value cannot inject additional flags or arguments.
+    _check_timeout("timeout", timeout)
     proc = _run([
         "-n", target.namespace,
         "rollout", "status",
