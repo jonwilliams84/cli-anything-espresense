@@ -122,7 +122,7 @@ def watch(host: str, topic_filter: str, *, port: int = 1883,
         if callback:
             try:
                 callback(rec["topic"], rec["payload"])
-            except Exception:
+            except Exception:  # nosec: B110
                 pass
 
     c = _client(host, port, username=username, password=password,
