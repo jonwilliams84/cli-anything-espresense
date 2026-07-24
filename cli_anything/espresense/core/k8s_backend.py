@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 import shutil
-import subprocess
+import subprocess  # nosec: B404
 from dataclasses import dataclass
 from typing import Optional
 
@@ -106,7 +106,7 @@ def _run(
 ) -> subprocess.CompletedProcess:
     """Run a kubectl command. Raises if it fails (when check=True)."""
     kc = _kubectl()
-    proc = subprocess.run(
+    proc = subprocess.run(  # nosec: B603
         [kc, *args],
         input=stdin,
         capture_output=True,
