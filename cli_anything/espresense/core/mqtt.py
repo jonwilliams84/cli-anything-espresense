@@ -21,6 +21,7 @@ Telemetry topics (subscribe):
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Callable, Optional
 
@@ -28,6 +29,8 @@ try:
     import paho.mqtt.client as mqtt
 except ImportError:  # pragma: no cover - optional at install time
     mqtt = None  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 
 class MqttError(RuntimeError):
@@ -123,7 +126,7 @@ def watch(host: str, topic_filter: str, *, port: int = 1883,
             try:
                 callback(rec["topic"], rec["payload"])
             except Exception:
-                pass
+                logger.exception("MQTT watch callback failed")
 
     c = _client(host, port, username=username, password=password,
                 client_id=f"cli-anything-espresense-watch-{int(time.time())}")

@@ -280,3 +280,52 @@ class TestTimeoutValidation:
                     target, timeout="120s; rm -rf /"
                 )
             mock_run.assert_not_called()
+
+
+# ── Regression tests: Bandit B404 / B603 suppression ─────────────────────────
+
+class TestSubprocessSecurityAnnotations:
+    """Verify nosec comments suppress Bandit B404/B603 for intentional kubectl use."""
+
+    def test_subprocess_import_has_nosec_b404(self):
+        """subprocess import must have nosec comment to suppress B404."""
+        import ast
+        import inspect
+
+        source = inspect.getsource(k8s_backend)
+        tree = ast.parse(source)
+
+        import_node = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, ast.Import) and any(a.name == "subprocess" for a in n.names)),
+            None,
+        )
+        assert import_node is not None, "subprocess import not found"
+        lines = source.splitlines()
+        import_line = next(i for i, l in enumerate(lines) if "import subprocess" in l)
+        context = " ".join(lines[import_line:import_line+3])
+        assert "nosec" in context and "B404" in context, \
+            f"subprocess import needs '# nosec: B404' comment (got: {context!r})"
+
+    def test_subprocess_run_has_nosec_b603(self):
+        """subprocess.run call must have nosec comment to suppress B603."""
+        import inspect
+        import re
+        source = inspect.getsource(k8s_backend._run)
+        assert "subprocess.run(" in source
+        assert re.search(r"subprocess\.run\([^)]*#.*nosec.*B603", source) is not None, (
+            "subprocess.run() call needs a '# nosec: B603' comment on the same line"
+        )
+
+    def test_run_uses_list_args_not_shell_string(self):
+        with patch.object(k8s_backend, "_kubectl", return_value="/bin/kubectl"):
+            with patch.object(k8s_backend.subprocess, "run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                try:
+                    k8s_backend._run(["get", "pods"])
+                except Exception:
+                    pass
+                call_args = mock_run.call_args[0][0]
+                assert isinstance(call_args, list), \
+                    f"subprocess.run must receive a list, got {type(call_args).__name__}"
+                assert call_args[0] == "/bin/kubectl"
