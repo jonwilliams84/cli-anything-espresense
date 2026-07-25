@@ -75,15 +75,15 @@ class TestListRooms:
 
     def test_floor_filter(self, parsed):
         rows = rooms_core.list_rooms(parsed, floor_id="first")
-        assert len(rows) == 4
-        assert all(r["floor_id"] == "first" for r in rows)
+        if len(rows) != 4: pytest.fail(f"Expected 4 rows on first floor, got {len(rows)}")
+        if not all(r['floor_id'] == 'first' for r in rows): pytest.fail('Not all rows have floor_id first')
 
     def test_node_assignment_strips_whitespace(self, parsed):
         rows = rooms_core.list_rooms(parsed, floor_id="first")
         by_name = {r["room_name"]: r for r in rows}
         # noah-bedroom node's `room: Sophie Bedroom ` (trailing space) should
         # still join to the Sophie Bedroom polygon thanks to strip()
-        assert "noah-bedroom" in by_name["Sophie Bedroom"]["node_names"]
+        if "noah-bedroom" not in by_name["Sophie Bedroom"]["node_names"]: pytest.fail("noah-bedroom not found in node_names for Sophie Bedroom")
 
 
 # ── rooms.rename ────────────────────────────────────────────────────────────
@@ -232,3 +232,49 @@ class TestYamlIO:
         assert first_rooms[2] == "Spare Room"
 
 
+
+
+# ── Regression: B101 assert_used fixes ───────────────────────────────────────
+# The following tests replace assert statements that were flagged by bandit
+# B101 (assert_used). Each guarded assertion is now expressed as a pytest.fail()
+# call so the check is never optimized away. These tests verify the SAME
+# conditions but in a dedicated regression class.
+
+class TestB101Regression:
+    """Regression tests: previously used bare assert, now use pytest.fail().
+    These ensure the checks cannot be silently stripped by -O compilation.
+    """
+
+    def test_list_rooms_floor_filter_returns_correct_count(self, parsed):
+        """Regression for former assert len(rows) == 4 (line 78)."""
+        rows = rooms_core.list_rooms(parsed, floor_id="first")
+        expected = 4
+        if len(rows) != expected:
+            pytest.fail(f"Expected {expected} rooms on floor 'first', got {len(rows)}")
+
+    def test_list_rooms_floor_filter_all_match_floor(self, parsed):
+        """Regression for former assert all(... for r in rows) (line 79)."""
+        rows = rooms_core.list_rooms(parsed, floor_id="first")
+        mismatches = [r for r in rows if r["floor_id"] != "first"]
+        if mismatches:
+            pytest.fail(
+                f"Expected all rows to have floor_id 'first', "
+                f"but found mismatches: {mismatches}"
+            )
+
+    def test_node_assignment_whitespace_stripping(self, parsed):
+        """Regression for former assert 'noah-bedroom' in node_names (line 86).
+
+        The noah-bedroom node has room: "Sophie Bedroom " (trailing space).
+        list_rooms must strip whitespace so the node joins the Sophie Bedroom
+        polygon correctly.
+        """
+        rows = rooms_core.list_rooms(parsed, floor_id="first")
+        by_name = {r["room_name"]: r for r in rows}
+        if "Sophie Bedroom" not in by_name:
+            pytest.fail("Sophie Bedroom not found in room list — whitespace stripping may be broken")
+        if "noah-bedroom" not in by_name["Sophie Bedroom"]["node_names"]:
+            pytest.fail(
+                "noah-bedroom node not assigned to Sophie Bedroom — "
+                "whitespace stripping of node room field may be broken"
+            )
