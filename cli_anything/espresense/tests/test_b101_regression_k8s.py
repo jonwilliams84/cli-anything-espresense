@@ -56,6 +56,7 @@ class TestB101RegressionK8s:
         # If assert was still used, it would be removed and test would fail.
         if result.returncode != 0:
             import pytest
+
             pytest.fail(
                 f"test_defaults_are_valid failed under -O optimization.\n"
                 f"This indicates assertions were not properly replaced.\n"
@@ -70,6 +71,7 @@ class TestB101RegressionK8s:
         but the if/raise pattern is not (since it's not an assert statement).
         """
         import pytest
+
         # Test that assert False is removed under -O (no error)
         result_assert = subprocess.run(
             [sys.executable, "-O", "-c", "assert False, 'should be removed'"],
@@ -79,9 +81,7 @@ class TestB101RegressionK8s:
         # With -O, assert is stripped, so this succeeds (returncode 0)
         # Without -O, this would raise AssertionError (returncode 1)
         if result_assert.returncode != 0:
-            pytest.fail(
-                "assert should be removed under -O, but wasn't"
-            )
+            pytest.fail("assert should be removed under -O, but wasn't")
 
     def test_if_raise_fires_on_wrong_default(self):
         """The if/raise pattern must raise AssertionError when a value is wrong.
@@ -144,6 +144,7 @@ class TestB101RegressionK8sAllFields:
 
     def test_if_raise_fires_on_wrong_deployment(self):
         """The deployment guard must raise AssertionError when wrong."""
+
         class FakeTarget:
             namespace = "espresense"
             deployment = "wrong-deployment"
@@ -154,6 +155,7 @@ class TestB101RegressionK8sAllFields:
 
     def test_if_raise_fires_on_wrong_container(self):
         """The container guard must raise AssertionError when wrong."""
+
         class FakeTarget:
             namespace = "espresense"
             deployment = "espresense-companion"
@@ -164,6 +166,7 @@ class TestB101RegressionK8sAllFields:
 
     def test_if_raise_fires_on_wrong_config_path(self):
         """The config_path guard must raise AssertionError when wrong."""
+
         class FakeTarget:
             namespace = "espresense"
             deployment = "espresense-companion"

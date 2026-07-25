@@ -15,6 +15,7 @@ from cli_anything.espresense.core import k8s_backend
 
 # ── K8sTarget validation ─────────────────────────────────────────────────────
 
+
 class TestK8sTargetValidation:
     """Untrusted fields must be rejected at construction, not at call time."""
 
@@ -29,7 +30,9 @@ class TestK8sTargetValidation:
         if t.container != "espresense-companion":
             raise AssertionError(f'container={t.container!r}, expected "espresense-companion"')
         if t.config_path != "/config/espresense/config.yaml":
-            raise AssertionError(f'config_path={t.config_path!r}, expected "/config/espresense/config.yaml"')
+            raise AssertionError(
+                f'config_path={t.config_path!r}, expected "/config/espresense/config.yaml"'
+            )
 
     @pytest.mark.parametrize(
         "field,value",
@@ -93,6 +96,7 @@ class TestK8sTargetValidation:
 
 # ── argv is always separate arguments ───────────────────────────────────────
 
+
 class TestArgvIsolation:
     """All kubectl calls must use a list of arguments, never shell strings."""
 
@@ -125,10 +129,7 @@ class TestArgvIsolation:
             ts_proc.stdout = b"1234567890\n"
             mock_exec.return_value = ts_proc
             k8s_backend.write_config(target, "yaml: data", backup=False)
-            dd_call = next(
-                c for c in mock_exec.call_args_list
-                if c[0][1][0] == "dd"
-            )
+            dd_call = next(c for c in mock_exec.call_args_list if c[0][1][0] == "dd")
             dd_argv = dd_call[0][1]
             of_arg = next(a for a in dd_argv if a.startswith("of="))
             assert of_arg == "of=/safe/path/config.yaml"
@@ -142,10 +143,7 @@ class TestArgvIsolation:
             ts_proc.stdout = b"1234567890\n"
             mock_exec.return_value = ts_proc
             k8s_backend.write_config(target, "yaml: data", backup=True)
-            cp_calls = [
-                c for c in mock_exec.call_args_list
-                if c[0][1][0] == "cp"
-            ]
+            cp_calls = [c for c in mock_exec.call_args_list if c[0][1][0] == "cp"]
             assert len(cp_calls) == 1
             cp_argv = cp_calls[0][0][1]
             bak_path = "/safe/path/config.yaml.1234567890.bak"
@@ -153,6 +151,7 @@ class TestArgvIsolation:
 
 
 # ── Timestamp must come from the pod, not the host ───────────────────────────
+
 
 class TestTimestampSource:
     """Backup timestamps are generated inside the target container."""
@@ -182,6 +181,7 @@ class TestTimestampSource:
 
 # ── _run uses a list, not shell=True ────────────────────────────────────────
 
+
 class TestRunListArgument:
     """_run must always use list-based subprocess calls, never shell=True."""
 
@@ -200,6 +200,7 @@ class TestRunListArgument:
 
 
 # ── rollout_status timeout validation ──────────────────────────────────────
+
 
 class TestTimeoutValidation:
     """The user-supplied --timeout value must be validated before it reaches
@@ -232,9 +233,7 @@ class TestTimeoutValidation:
     )
     def test_rejects_unsafe_timeout(self, timeout):
         with pytest.raises(ValueError, match=r"contains unsafe characters"):
-            k8s_backend.rollout_status(
-                k8s_backend.K8sTarget(), timeout=timeout
-            )
+            k8s_backend.rollout_status(k8s_backend.K8sTarget(), timeout=timeout)
 
     @pytest.mark.parametrize(
         "timeout",
@@ -253,28 +252,20 @@ class TestTimeoutValidation:
         """Valid timeout values must be accepted and reach _run unchanged."""
         target = k8s_backend.K8sTarget()
         with patch.object(k8s_backend, "_run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="ok", stderr=""
-            )
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
             k8s_backend.rollout_status(target, timeout=timeout)
             args = mock_run.call_args[0][0]
-            timeout_arg = next(
-                a for a in args if a.startswith("--timeout=")
-            )
+            timeout_arg = next(a for a in args if a.startswith("--timeout="))
             assert timeout_arg == f"--timeout={timeout}"
 
     def test_default_timeout_is_valid(self):
         """The default timeout '120s' must pass validation."""
         target = k8s_backend.K8sTarget()
         with patch.object(k8s_backend, "_run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="ok", stderr=""
-            )
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
             k8s_backend.rollout_status(target)
             args = mock_run.call_args[0][0]
-            timeout_arg = next(
-                a for a in args if a.startswith("--timeout=")
-            )
+            timeout_arg = next(a for a in args if a.startswith("--timeout="))
             assert timeout_arg == "--timeout=120s"
 
     def test_unsafe_timeout_never_reaches_run(self):
@@ -282,13 +273,12 @@ class TestTimeoutValidation:
         target = k8s_backend.K8sTarget()
         with patch.object(k8s_backend, "_run") as mock_run:
             with pytest.raises(ValueError):
-                k8s_backend.rollout_status(
-                    target, timeout="120s; rm -rf /"
-                )
+                k8s_backend.rollout_status(target, timeout="120s; rm -rf /")
             mock_run.assert_not_called()
 
 
 # ── Regression tests: Bandit B404 / B603 suppression ─────────────────────────
+
 
 class TestSubprocessSecurityAnnotations:
     """Verify nosec comments suppress Bandit B404/B603 for intentional kubectl use."""
@@ -302,8 +292,11 @@ class TestSubprocessSecurityAnnotations:
         tree = ast.parse(source)
 
         import_node = next(
-            (n for n in ast.walk(tree)
-             if isinstance(n, ast.Import) and any(a.name == "subprocess" for a in n.names)),
+            (
+                n
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Import) and any(a.name == "subprocess" for a in n.names)
+            ),
             None,
         )
         assert import_node is not None, "subprocess import not found"
@@ -312,14 +305,16 @@ class TestSubprocessSecurityAnnotations:
         # Find the line with "import subprocess"
         import_line = next(i for i, l in enumerate(lines) if "import subprocess" in l)
         # Check that either this line or the next has a nosec comment
-        context = " ".join(lines[import_line:import_line+3])
-        assert "nosec" in context and "B404" in context, \
+        context = " ".join(lines[import_line : import_line + 3])
+        assert "nosec" in context and "B404" in context, (
             f"subprocess import needs '# nosec: B404' comment (got: {context!r})"
+        )
 
     def test_subprocess_run_has_nosec_b603(self):
         """subprocess.run call must have nosec comment to suppress B603."""
         import inspect
         import re
+
         source = inspect.getsource(k8s_backend._run)
         assert "subprocess.run(" in source
         # The nosec comment must appear on the same line as the subprocess.run call
@@ -336,7 +331,8 @@ class TestSubprocessSecurityAnnotations:
                 except Exception:
                     pass
                 call_args = mock_run.call_args[0][0]
-                assert isinstance(call_args, list), \
+                assert isinstance(call_args, list), (
                     f"subprocess.run must receive a list, got {type(call_args).__name__}"
+                )
                 # The first element should be the kubectl path
                 assert call_args[0] == "/bin/kubectl"

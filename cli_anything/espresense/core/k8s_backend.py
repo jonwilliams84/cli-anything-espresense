@@ -115,20 +115,24 @@ def _run(
     )
     if check and proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
-        raise RuntimeError(
-            f"kubectl {' '.join(args)} failed (exit {proc.returncode}): {stderr}"
-        )
+        raise RuntimeError(f"kubectl {' '.join(args)} failed (exit {proc.returncode}): {stderr}")
     return proc
 
 
 def pod_name(target: K8sTarget) -> str:
     """Resolve the running pod for the deployment."""
-    proc = _run([
-        "-n", target.namespace,
-        "get", "pods",
-        "-l", f"app={target.deployment}",
-        "-o", "jsonpath={.items[0].metadata.name}",
-    ])
+    proc = _run(
+        [
+            "-n",
+            target.namespace,
+            "get",
+            "pods",
+            "-l",
+            f"app={target.deployment}",
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+        ]
+    )
     name = (proc.stdout or "").strip()
     if not name:
         # fall back: deploy/<name> targeting
@@ -136,14 +140,17 @@ def pod_name(target: K8sTarget) -> str:
     return name
 
 
-def exec_(target: K8sTarget, argv: list[str], *, stdin: Optional[str] = None,
-          check: bool = True) -> subprocess.CompletedProcess:
+def exec_(
+    target: K8sTarget, argv: list[str], *, stdin: Optional[str] = None, check: bool = True
+) -> subprocess.CompletedProcess:
     """Run a command inside the companion container."""
     args = [
-        "-n", target.namespace,
+        "-n",
+        target.namespace,
         "exec",
         f"deploy/{target.deployment}",
-        "-c", target.container,
+        "-c",
+        target.container,
     ]
     if stdin is not None:
         args.append("-i")
@@ -171,33 +178,55 @@ def write_config(target: K8sTarget, yaml_text: str, *, backup: bool = True) -> N
     ts = int(ts_proc.stdout.decode("utf-8").strip())
     bak_path = f"{target.config_path}.{ts}.bak"
     if backup:
-        exec_(target, [
-            "cp", target.config_path, bak_path,
-        ], check=False)
+        exec_(
+            target,
+            [
+                "cp",
+                target.config_path,
+                bak_path,
+            ],
+            check=False,
+        )
     # tee-by-stdin pattern: feed the file content as stdin, write with `dd`
     # so newlines and trailing whitespace are preserved verbatim.
-    exec_(target, [
-        "dd", f"of={target.config_path}",
-    ], stdin=yaml_text, check=True)
+    exec_(
+        target,
+        [
+            "dd",
+            f"of={target.config_path}",
+        ],
+        stdin=yaml_text,
+        check=True,
+    )
 
 
 def restart(target: K8sTarget) -> None:
     """Trigger a rolling restart of the companion deployment."""
-    _run([
-        "-n", target.namespace,
-        "rollout", "restart",
-        f"deployment/{target.deployment}",
-    ], check=True)
+    _run(
+        [
+            "-n",
+            target.namespace,
+            "rollout",
+            "restart",
+            f"deployment/{target.deployment}",
+        ],
+        check=True,
+    )
 
 
 def rollout_status(target: K8sTarget, timeout: str = "120s") -> str:
     # Validate the user-supplied timeout before it reaches kubectl so a
     # malicious value cannot inject additional flags or arguments.
     _check_timeout("timeout", timeout)
-    proc = _run([
-        "-n", target.namespace,
-        "rollout", "status",
-        f"deployment/{target.deployment}",
-        f"--timeout={timeout}",
-    ], check=False)
+    proc = _run(
+        [
+            "-n",
+            target.namespace,
+            "rollout",
+            "status",
+            f"deployment/{target.deployment}",
+            f"--timeout={timeout}",
+        ],
+        check=False,
+    )
     return (proc.stdout or "") + (proc.stderr or "")

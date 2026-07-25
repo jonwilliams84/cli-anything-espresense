@@ -21,6 +21,7 @@ Telemetry topics (subscribe):
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Callable, Optional
 
@@ -34,10 +35,14 @@ class MqttError(RuntimeError):
     pass
 
 
-def _client(host: str, port: int = 1883, *,
-            username: Optional[str] = None,
-            password: Optional[str] = None,
-            client_id: str = "cli-anything-espresense") -> "mqtt.Client":
+def _client(
+    host: str,
+    port: int = 1883,
+    *,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    client_id: str = "cli-anything-espresense",
+) -> "mqtt.Client":
     if mqtt is None:
         raise MqttError(
             "paho-mqtt is not installed — pip install paho-mqtt or reinstall "
@@ -50,10 +55,18 @@ def _client(host: str, port: int = 1883, *,
     return c
 
 
-def publish_setting(host: str, node_id: str, key: str, value, *,
-                    port: int = 1883, username: Optional[str] = None,
-                    password: Optional[str] = None, prefix: str = "espresense",
-                    retain: bool = True) -> dict:
+def publish_setting(
+    host: str,
+    node_id: str,
+    key: str,
+    value,
+    *,
+    port: int = 1883,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    prefix: str = "espresense",
+    retain: bool = True,
+) -> dict:
     """Publish a per-node setting and disconnect.
 
     `value` is stringified — bools become "true"/"false", others use str().
@@ -78,9 +91,16 @@ def publish_setting(host: str, node_id: str, key: str, value, *,
         c.disconnect()
 
 
-def publish_raw(host: str, topic: str, payload, *, port: int = 1883,
-                username: Optional[str] = None, password: Optional[str] = None,
-                retain: bool = False) -> dict:
+def publish_raw(
+    host: str,
+    topic: str,
+    payload,
+    *,
+    port: int = 1883,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    retain: bool = False,
+) -> dict:
     """Publish an arbitrary topic — useful for /settings/+/config writes."""
     if isinstance(payload, (dict, list)):
         payload_str = json.dumps(payload)
@@ -101,10 +121,16 @@ def publish_raw(host: str, topic: str, payload, *, port: int = 1883,
         c.disconnect()
 
 
-def watch(host: str, topic_filter: str, *, port: int = 1883,
-          username: Optional[str] = None, password: Optional[str] = None,
-          duration: Optional[float] = None,
-          callback: Optional[Callable[[str, str], None]] = None) -> list[dict]:
+def watch(
+    host: str,
+    topic_filter: str,
+    *,
+    port: int = 1883,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    duration: Optional[float] = None,
+    callback: Optional[Callable[[str, str], None]] = None,
+) -> list[dict]:
     """Subscribe to a topic filter and collect/print messages.
 
     If `duration` is None, runs until KeyboardInterrupt. Returns a list of
@@ -122,11 +148,23 @@ def watch(host: str, topic_filter: str, *, port: int = 1883,
         if callback:
             try:
                 callback(rec["topic"], rec["payload"])
-            except Exception:  # nosec: B110
-                pass
+            except Exception:
+                # A caller-supplied callback must never abort message collection,
+                # but silently discarding its exception (the previous
+                # `except Exception: pass`) made a broken callback impossible to
+                # diagnose - subscribe() just returned fewer results than
+                # expected with no indication why. Log and carry on instead.
+                logging.getLogger(__name__).warning(
+                    "mqtt subscribe callback failed for topic %s", rec["topic"], exc_info=True
+                )
 
-    c = _client(host, port, username=username, password=password,
-                client_id=f"cli-anything-espresense-watch-{int(time.time())}")
+    c = _client(
+        host,
+        port,
+        username=username,
+        password=password,
+        client_id=f"cli-anything-espresense-watch-{int(time.time())}",
+    )
     c.on_message = _on_msg
     c.subscribe(topic_filter, qos=0)
     c.loop_start()

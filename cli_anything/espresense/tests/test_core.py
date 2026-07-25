@@ -65,28 +65,36 @@ def parsed():
 
 # ── rooms.list_rooms ────────────────────────────────────────────────────────
 
+
 class TestListRooms:
     def test_all_floors(self, parsed):
         rows = rooms_core.list_rooms(parsed)
-        if len(rows) != 6: pytest.fail("Expected 6 rooms across all floors")
+        if len(rows) != 6:
+            pytest.fail("Expected 6 rooms across all floors")
         names = [r["room_name"] for r in rows]
-        if "Kitchen" not in names: pytest.fail("Kitchen should appear in room list")
-        if "Sophie Bedroom" not in names: pytest.fail("Sophie Bedroom should appear in room list")
+        if "Kitchen" not in names:
+            pytest.fail("Kitchen should appear in room list")
+        if "Sophie Bedroom" not in names:
+            pytest.fail("Sophie Bedroom should appear in room list")
 
     def test_floor_filter(self, parsed):
         rows = rooms_core.list_rooms(parsed, floor_id="first")
-        if len(rows) != 4: pytest.fail(f"Expected 4 rows on first floor, got {len(rows)}")
-        if not all(r['floor_id'] == 'first' for r in rows): pytest.fail('Not all rows have floor_id first')
+        if len(rows) != 4:
+            pytest.fail(f"Expected 4 rows on first floor, got {len(rows)}")
+        if not all(r["floor_id"] == "first" for r in rows):
+            pytest.fail("Not all rows have floor_id first")
 
     def test_node_assignment_strips_whitespace(self, parsed):
         rows = rooms_core.list_rooms(parsed, floor_id="first")
         by_name = {r["room_name"]: r for r in rows}
         # noah-bedroom node's `room: Sophie Bedroom ` (trailing space) should
         # still join to the Sophie Bedroom polygon thanks to strip()
-        if "noah-bedroom" not in by_name["Sophie Bedroom"]["node_names"]: pytest.fail("noah-bedroom not found in node_names for Sophie Bedroom")
+        if "noah-bedroom" not in by_name["Sophie Bedroom"]["node_names"]:
+            pytest.fail("noah-bedroom not found in node_names for Sophie Bedroom")
 
 
 # ── rooms.rename ────────────────────────────────────────────────────────────
+
 
 class TestRename:
     def test_simple_rename(self, parsed):
@@ -95,9 +103,13 @@ class TestRename:
         if summary["rooms_renamed"] != 1:
             pytest.fail(f"Expected rooms_renamed == 1, got {summary['rooms_renamed']}")
         if summary["nodes_repointed"] != 1:
-            pytest.fail(f"Expected nodes_repointed == 1, got {summary['nodes_repointed']}")  # kitchen node
+            pytest.fail(
+                f"Expected nodes_repointed == 1, got {summary['nodes_repointed']}"
+            )  # kitchen node
         if parsed["floors"][0]["rooms"][0]["name"] != "Cook Room":
-            pytest.fail(f"Expected room name 'Cook Room', got {parsed['floors'][0]['rooms'][0]['name']}")
+            pytest.fail(
+                f"Expected room name 'Cook Room', got {parsed['floors'][0]['rooms'][0]['name']}"
+            )
         # node's room ref updated too
         kitchen_node = next(n for n in parsed["nodes"] if n["name"] == "kitchen")
         if kitchen_node["room"] != "Cook Room":
@@ -128,43 +140,56 @@ class TestRename:
 
 # ── rooms.rotate ────────────────────────────────────────────────────────────
 
+
 class TestRotate:
     def test_three_way_cycle(self, parsed):
         """The actual real-world case: A→B→C→A rotation should leave each
         physical polygon labeled with the post-rotation room name."""
-        result = rooms_core.rotate(parsed, {
-            "Spare Room": "Noah Bedroom",
-            "Noah Bedroom": "Sophie Bedroom",
-            "Sophie Bedroom": "Spare Room",
-        })
+        rooms_core.rotate(
+            parsed,
+            {
+                "Spare Room": "Noah Bedroom",
+                "Noah Bedroom": "Sophie Bedroom",
+                "Sophie Bedroom": "Spare Room",
+            },
+        )
         # All three should have rotated
         names = [r["name"] for r in parsed["floors"][1]["rooms"]]
-        if sorted(names) != sorted(["Noah Bedroom", "Sophie Bedroom", "Spare Room", "Master Bedroom"]):
+        if sorted(names) != sorted(
+            ["Noah Bedroom", "Sophie Bedroom", "Spare Room", "Master Bedroom"]
+        ):
             pytest.fail("Expected rotated room names after three-way cycle")
         # Floor index 0 -> originally "Spare Room", now "Noah Bedroom"
         if parsed["floors"][1]["rooms"][0]["name"] != "Noah Bedroom":
-            pytest.fail(f"Expected rooms[0].name == 'Noah Bedroom', got {parsed['floors'][1]['rooms'][0]['name']}")
+            pytest.fail(
+                f"Expected rooms[0].name == 'Noah Bedroom', got {parsed['floors'][1]['rooms'][0]['name']}"
+            )
         if parsed["floors"][1]["rooms"][1]["name"] != "Sophie Bedroom":
-            pytest.fail(f"Expected rooms[1].name == 'Sophie Bedroom', got {parsed['floors'][1]['rooms'][1]['name']}")
+            pytest.fail(
+                f"Expected rooms[1].name == 'Sophie Bedroom', got {parsed['floors'][1]['rooms'][1]['name']}"
+            )
         if parsed["floors"][1]["rooms"][2]["name"] != "Spare Room":
-            pytest.fail(f"Expected rooms[2].name == 'Spare Room', got {parsed['floors'][1]['rooms'][2]['name']}")
+            pytest.fail(
+                f"Expected rooms[2].name == 'Spare Room', got {parsed['floors'][1]['rooms'][2]['name']}"
+            )
         # Node room: references should follow the rotation too
         n_noah = next(n for n in parsed["nodes"] if n["name"] == "noah-bedroom")
         n_sophie = next(n for n in parsed["nodes"] if n["name"] == "sophie-bedroom")
         n_spare = next(n for n in parsed["nodes"] if n["name"] == "spare-room")
         # noah-bedroom's room was "Sophie Bedroom" (with trailing space, stripped),
         # which rotated -> "Spare Room"
-        if n_noah['room'] != "Spare Room":
+        if n_noah["room"] != "Spare Room":
             pytest.fail(f"Expected n_noah['room'] == 'Spare Room', got {n_noah['room']}")
         # sophie-bedroom's room was "Spare Room" -> rotated to "Noah Bedroom"
-        if n_sophie['room'] != "Noah Bedroom":
+        if n_sophie["room"] != "Noah Bedroom":
             pytest.fail(f"Expected n_sophie['room'] == 'Noah Bedroom', got {n_sophie['room']}")
         # spare-room's room was "Noah Bedroom" -> rotated to "Sophie Bedroom"
-        if n_spare['room'] != "Sophie Bedroom":
+        if n_spare["room"] != "Sophie Bedroom":
             pytest.fail(f"Expected n_spare['room'] == 'Sophie Bedroom', got {n_spare['room']}")
         # Master Bedroom node should be untouched
         n_master = next(n for n in parsed["nodes"] if n["name"] == "bedroom")
-        if not n_master['room'] == "Master Bedroom": pytest.fail("Assertion failed")
+        if not n_master["room"] == "Master Bedroom":
+            pytest.fail("Assertion failed")
 
     def test_rotate_rejects_duplicate_new(self, parsed):
         # dict literals can't have duplicate keys, so only `new` collisions
@@ -175,49 +200,66 @@ class TestRotate:
 
 # ── rooms.repoint_node ──────────────────────────────────────────────────────
 
+
 class TestRepointNode:
     def test_found(self, parsed):
         out = rooms_core.repoint_node(parsed, "noah-bedroom", "Noah Bedroom")
-        if not out["found"] is True: pytest.fail("Assertion failed")
-        if not out["after"] == "Noah Bedroom": pytest.fail("Assertion failed")
+        if out["found"] is not True:
+            pytest.fail("Assertion failed")
+        if not out["after"] == "Noah Bedroom":
+            pytest.fail("Assertion failed")
         n = next(n for n in parsed["nodes"] if n["name"] == "noah-bedroom")
-        if not n["room"] == "Noah Bedroom": pytest.fail("Assertion failed")
+        if not n["room"] == "Noah Bedroom":
+            pytest.fail("Assertion failed")
 
     def test_missing(self, parsed):
         out = rooms_core.repoint_node(parsed, "ghost-node", "Anywhere")
-        if not out["found"] is False: pytest.fail("Assertion failed")
+        if out["found"] is not False:
+            pytest.fail("Assertion failed")
 
 
 # ── nodes module ────────────────────────────────────────────────────────────
+
 
 class TestNodesCore:
     def test_list_config_nodes_strips_whitespace(self, parsed):
         rows = nodes_core.list_config_nodes(parsed)
         by_name = {r["name"]: r for r in rows}
-        if not by_name["noah-bedroom"]["room"] == "Sophie Bedroom": pytest.fail("Assertion failed")
-        if not by_name["noah-bedroom"]["room_raw"] == "Sophie Bedroom ": pytest.fail("Assertion failed")
+        if not by_name["noah-bedroom"]["room"] == "Sophie Bedroom":
+            pytest.fail("Assertion failed")
+        if not by_name["noah-bedroom"]["room_raw"] == "Sophie Bedroom ":
+            pytest.fail("Assertion failed")
 
     def test_rename_in_config(self, parsed):
         out = nodes_core.rename_in_config(parsed, "spare-room", "noah-bedroom-new")
-        if not out["found"] is True: pytest.fail("Assertion failed")
+        if out["found"] is not True:
+            pytest.fail("Assertion failed")
         names = [n["name"] for n in parsed["nodes"]]
-        if not "spare-room" not in names: pytest.fail("Assertion failed")
-        if not "noah-bedroom-new" in names: pytest.fail("Assertion failed")
+        if not "spare-room" not in names:
+            pytest.fail("Assertion failed")
+        if "noah-bedroom-new" not in names:
+            pytest.fail("Assertion failed")
 
     def test_set_point(self, parsed):
         out = nodes_core.set_point(parsed, "kitchen", [9.0, 8.0, 7.0])
-        if not out["found"] is True: pytest.fail("Assertion failed")
+        if out["found"] is not True:
+            pytest.fail("Assertion failed")
         n = next(n for n in parsed["nodes"] if n["name"] == "kitchen")
-        if not list(n["point"]) == [9.0, 8.0, 7.0]: pytest.fail("Assertion failed")
+        if not list(n["point"]) == [9.0, 8.0, 7.0]:
+            pytest.fail("Assertion failed")
 
     def test_remove(self, parsed):
-        if not nodes_core.remove(parsed, "kitchen") is True: pytest.fail("Assertion failed")
+        if nodes_core.remove(parsed, "kitchen") is not True:
+            pytest.fail("Assertion failed")
         names = [n["name"] for n in parsed["nodes"]]
-        if not "kitchen" not in names: pytest.fail("Assertion failed")
-        if not nodes_core.remove(parsed, "ghost") is False: pytest.fail("Assertion failed")
+        if not "kitchen" not in names:
+            pytest.fail("Assertion failed")
+        if nodes_core.remove(parsed, "ghost") is not False:
+            pytest.fail("Assertion failed")
 
 
 # ── yaml_io round-trip ──────────────────────────────────────────────────────
+
 
 class TestYamlIO:
     def test_round_trip_preserves_structure(self):
@@ -225,28 +267,37 @@ class TestYamlIO:
         text = yaml_io.dumps(parsed)
         reparsed = yaml_io.load(text)
         # node count, room count, names all preserved
-        if not len(reparsed["nodes"]) == len(parsed["nodes"]): pytest.fail("Assertion failed")
-        if not sum(len(f["rooms"]) for f in reparsed["floors"]) == 6: pytest.fail("Assertion failed")
+        if not len(reparsed["nodes"]) == len(parsed["nodes"]):
+            pytest.fail("Assertion failed")
+        if not sum(len(f["rooms"]) for f in reparsed["floors"]) == 6:
+            pytest.fail("Assertion failed")
 
     def test_edit_then_round_trip(self):
         parsed = yaml_io.load(SAMPLE)
-        rooms_core.rotate(parsed, {
-            "Spare Room": "Noah Bedroom",
-            "Noah Bedroom": "Sophie Bedroom",
-            "Sophie Bedroom": "Spare Room",
-        })
+        rooms_core.rotate(
+            parsed,
+            {
+                "Spare Room": "Noah Bedroom",
+                "Noah Bedroom": "Sophie Bedroom",
+                "Sophie Bedroom": "Spare Room",
+            },
+        )
         text = yaml_io.dumps(parsed)
-        if not "Noah Bedroom" in text: pytest.fail("Assertion failed")
-        if not "Sophie Bedroom" in text: pytest.fail("Assertion failed")
-        if not "Spare Room" in text: pytest.fail("Assertion failed")
+        if "Noah Bedroom" not in text:
+            pytest.fail("Assertion failed")
+        if "Sophie Bedroom" not in text:
+            pytest.fail("Assertion failed")
+        if "Spare Room" not in text:
+            pytest.fail("Assertion failed")
         # round-trip stable
         reparsed = yaml_io.load(text)
         first_rooms = [r["name"] for r in reparsed["floors"][1]["rooms"]]
-        if not first_rooms[0] == "Noah Bedroom": pytest.fail("Assertion failed")
-        if not first_rooms[1] == "Sophie Bedroom": pytest.fail("Assertion failed")
-        if not first_rooms[2] == "Spare Room": pytest.fail("Assertion failed")
-
-
+        if not first_rooms[0] == "Noah Bedroom":
+            pytest.fail("Assertion failed")
+        if not first_rooms[1] == "Sophie Bedroom":
+            pytest.fail("Assertion failed")
+        if not first_rooms[2] == "Spare Room":
+            pytest.fail("Assertion failed")
 
 
 # ── Regression: B101 assert_used fixes ───────────────────────────────────────
@@ -254,6 +305,7 @@ class TestYamlIO:
 # B101 (assert_used). Each guarded assertion is now expressed as a pytest.fail()
 # call so the check is never optimized away. These tests verify the SAME
 # conditions but in a dedicated regression class.
+
 
 class TestB101Regression:
     """Regression tests: previously used bare assert, now use pytest.fail().
@@ -273,8 +325,7 @@ class TestB101Regression:
         mismatches = [r for r in rows if r["floor_id"] != "first"]
         if mismatches:
             pytest.fail(
-                f"Expected all rows to have floor_id 'first', "
-                f"but found mismatches: {mismatches}"
+                f"Expected all rows to have floor_id 'first', but found mismatches: {mismatches}"
             )
 
     def test_node_assignment_whitespace_stripping(self, parsed):
@@ -287,7 +338,9 @@ class TestB101Regression:
         rows = rooms_core.list_rooms(parsed, floor_id="first")
         by_name = {r["room_name"]: r for r in rows}
         if "Sophie Bedroom" not in by_name:
-            pytest.fail("Sophie Bedroom not found in room list — whitespace stripping may be broken")
+            pytest.fail(
+                "Sophie Bedroom not found in room list — whitespace stripping may be broken"
+            )
         if "noah-bedroom" not in by_name["Sophie Bedroom"]["node_names"]:
             pytest.fail(
                 "noah-bedroom node not assigned to Sophie Bedroom — "
@@ -302,9 +355,7 @@ class TestB101Regression:
         summary = rooms_core.rename(parsed, "Kitchen", "Cook Room")
         expected = 1
         if summary["rooms_renamed"] != expected:
-            pytest.fail(
-                f"Expected rooms_renamed == {expected}, got {summary['rooms_renamed']}"
-            )
+            pytest.fail(f"Expected rooms_renamed == {expected}, got {summary['rooms_renamed']}")
 
     def test_rename_returns_nodes_repointed_count(self, parsed):
         """Regression for former assert summary["nodes_repointed"] == 1 (line 95).
@@ -314,9 +365,7 @@ class TestB101Regression:
         summary = rooms_core.rename(parsed, "Kitchen", "Cook Room")
         expected = 1  # kitchen node
         if summary["nodes_repointed"] != expected:
-            pytest.fail(
-                f"Expected nodes_repointed == {expected}, got {summary['nodes_repointed']}"
-            )
+            pytest.fail(f"Expected nodes_repointed == {expected}, got {summary['nodes_repointed']}")
 
     def test_rename_updates_floor_room_name(self, parsed):
         """Regression for former assert parsed["floors"][0]["rooms"][0]["name"] == "Cook Room" (line 96).
@@ -328,4 +377,3 @@ class TestB101Regression:
         expected = "Cook Room"
         if actual != expected:
             pytest.fail(f"Expected room name '{expected}', got '{actual}'")
-

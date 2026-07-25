@@ -35,8 +35,9 @@ class NodeError(RuntimeError):
 
 
 class NodeClient:
-    def __init__(self, host: str, *, port: int = 80, timeout: int = 10,
-                 scheme: str = "http") -> None:
+    def __init__(
+        self, host: str, *, port: int = 80, timeout: int = 10, scheme: str = "http"
+    ) -> None:
         host = host.strip()
         if host.startswith("http://") or host.startswith("https://"):
             self.base_url = host.rstrip("/")
@@ -90,9 +91,7 @@ class NodeClient:
             raise ValueError("section must be one of: main, extras, hardware")
         resp = self._request("GET", f"/wifi/{section}")
         if resp.status_code >= 400:
-            raise NodeError(
-                f"GET /wifi/{section} -> {resp.status_code}: {resp.text[:200]}"
-            )
+            raise NodeError(f"GET /wifi/{section} -> {resp.status_code}: {resp.text[:200]}")
         try:
             return resp.json()
         except ValueError:
@@ -109,9 +108,7 @@ class NodeClient:
         data = {k: ("" if v is None else str(v)) for k, v in fields.items()}
         resp = self._request("POST", f"/wifi/{section}", data=data)
         if resp.status_code >= 400:
-            raise NodeError(
-                f"POST /wifi/{section} -> {resp.status_code}: {resp.text[:200]}"
-            )
+            raise NodeError(f"POST /wifi/{section} -> {resp.status_code}: {resp.text[:200]}")
         return {"status": resp.status_code, "body": resp.text[:500]}
 
     # ── device-config CRUD ──────────────────────────────────────────────────
@@ -120,9 +117,14 @@ class NodeClient:
         info = self.info(show_all=True)
         return info.get("configs") or []
 
-    def upsert_device_config(self, device_id: str, *, alias: Optional[str] = None,
-                              name: Optional[str] = None,
-                              rssi_at_1m: Optional[int] = None) -> dict:
+    def upsert_device_config(
+        self,
+        device_id: str,
+        *,
+        alias: Optional[str] = None,
+        name: Optional[str] = None,
+        rssi_at_1m: Optional[int] = None,
+    ) -> dict:
         payload: dict[str, Any] = {"id": device_id}
         if alias is not None:
             payload["alias"] = alias
@@ -132,9 +134,7 @@ class NodeClient:
             payload["rssi@1m"] = rssi_at_1m
         resp = self._request("POST", "/json/configs", json=payload)
         if resp.status_code >= 400:
-            raise NodeError(
-                f"POST /json/configs -> {resp.status_code}: {resp.text[:200]}"
-            )
+            raise NodeError(f"POST /json/configs -> {resp.status_code}: {resp.text[:200]}")
         try:
             return resp.json()
         except ValueError:
@@ -163,9 +163,7 @@ class NodeClient:
     def scan_wifi(self) -> list[dict]:
         resp = self._request("GET", "/wifi/scan")
         if resp.status_code >= 400:
-            raise NodeError(
-                f"GET /wifi/scan -> {resp.status_code}: {resp.text[:200]}"
-            )
+            raise NodeError(f"GET /wifi/scan -> {resp.status_code}: {resp.text[:200]}")
         try:
             data = resp.json()
         except ValueError:
