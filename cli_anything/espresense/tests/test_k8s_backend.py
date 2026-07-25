@@ -20,10 +20,16 @@ class TestK8sTargetValidation:
 
     def test_defaults_are_valid(self):
         t = k8s_backend.K8sTarget()
-        assert t.namespace == "espresense"  # nosec B101: Pytest assertion
-        assert t.deployment == "espresense-companion"  # nosec B101: Pytest assertion
-        assert t.container == "espresense-companion"  # nosec B101: Pytest assertion
-        assert t.config_path == "/config/espresense/config.yaml"  # nosec B101: Pytest assertion
+        # Use explicit if/raise AssertionError instead of `assert` so the
+        # checks are NOT stripped under `python -O` (B101: assert_used).
+        if t.namespace != "espresense":
+            raise AssertionError(f'namespace={t.namespace!r}, expected "espresense"')
+        if t.deployment != "espresense-companion":
+            raise AssertionError(f'deployment={t.deployment!r}, expected "espresense-companion"')
+        if t.container != "espresense-companion":
+            raise AssertionError(f'container={t.container!r}, expected "espresense-companion"')
+        if t.config_path != "/config/espresense/config.yaml":
+            raise AssertionError(f'config_path={t.config_path!r}, expected "/config/espresense/config.yaml"')
 
     @pytest.mark.parametrize(
         "field,value",
@@ -334,5 +340,3 @@ class TestSubprocessSecurityAnnotations:
                     f"subprocess.run must receive a list, got {type(call_args).__name__}"
                 # The first element should be the kubectl path
                 assert call_args[0] == "/bin/kubectl"
-
-

@@ -74,3 +74,34 @@ class TestB101RegressionK8s:
             pytest.fail(
                 "assert should be removed under -O, but wasn't"
             )
+
+    def test_if_raise_fires_on_wrong_default(self):
+        """The if/raise pattern must raise AssertionError when a value is wrong.
+
+        This directly verifies the behaviour change: the replaced checks are
+        real runtime guards (not assert statements that vanish under -O).
+        We patch the K8sTarget constructor so the returned object's namespace
+        differs from what test_defaults_are_valid expects, and confirm the
+        if/raise raises AssertionError (which a stripped assert would not).
+        """
+        import pytest
+        from cli_anything.espresense.core import k8s_backend
+        from cli_anything.espresense.tests.test_k8s_backend import (
+            TestK8sTargetValidation,
+        )
+
+        tester = TestK8sTargetValidation()
+        original = k8s_backend.K8sTarget
+
+        class FakeTarget:
+            namespace = "other-ns"
+            deployment = "espresense-companion"
+            container = "espresense-companion"
+            config_path = "/config/espresense/config.yaml"
+
+        k8s_backend.K8sTarget = FakeTarget
+        try:
+            with pytest.raises(AssertionError, match="namespace"):
+                tester.test_defaults_are_valid()
+        finally:
+            k8s_backend.K8sTarget = original
