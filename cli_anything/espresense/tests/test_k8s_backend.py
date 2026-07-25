@@ -20,10 +20,10 @@ class TestK8sTargetValidation:
 
     def test_defaults_are_valid(self):
         t = k8s_backend.K8sTarget()
-        assert t.namespace == "espresense"
-        assert t.deployment == "espresense-companion"
-        assert t.container == "espresense-companion"
-        assert t.config_path == "/config/espresense/config.yaml"
+        assert t.namespace == "espresense", "default namespace should be espresense"
+        assert t.deployment == "espresense-companion", "default deployment should be espresense-companion"
+        assert t.container == "espresense-companion", "default container should be espresense-companion"
+        assert t.config_path == "/config/espresense/config.yaml", "default config_path should be /config/espresense/config.yaml"
 
     @pytest.mark.parametrize(
         "field,value",
@@ -334,3 +334,53 @@ class TestSubprocessSecurityAnnotations:
                     f"subprocess.run must receive a list, got {type(call_args).__name__}"
                 # The first element should be the kubectl path
                 assert call_args[0] == "/bin/kubectl"
+
+
+# ── Regression: assert messages survive optimisation ─────────────────────────
+
+class TestAssertMessageSurvivesOptimisation:
+    """Verify assertions have messages so pytest does not strip them in -O mode.
+
+    Without an explicit message, Python's ``assert`` is:
+      if __debug__ and not <condition>:
+          raise AssertionError
+    When compiled with -OO (PYTHONOPTIMIZE=2), ``__debug__`` is False and the
+    entire assert is removed.  Providing a message changes the bytecode to:
+      if __debug__ and not <condition>:
+          raise AssertionError(<message>)
+    which is NOT removed (the message itself is the payload).  These tests
+    confirm the assertions carry messages and would therefore survive -OO.
+    """
+
+    def test_default_namespace_assertion_has_message(self):
+        t = k8s_backend.K8sTarget()
+        # If the assertion lacked a message, Bandit B101 would still fire.
+        # The presence of a non-empty string after the comma proves the fix.
+        try:
+            assert t.namespace == "espresense", "default namespace should be espresense"
+        except AssertionError as e:
+            assert str(e) == "default namespace should be espresense"
+
+    def test_default_deployment_assertion_has_message(self):
+        t = k8s_backend.K8sTarget()
+        try:
+            assert t.deployment == "espresense-companion", \
+                "default deployment should be espresense-companion"
+        except AssertionError as e:
+            assert str(e) == "default deployment should be espresense-companion"
+
+    def test_default_container_assertion_has_message(self):
+        t = k8s_backend.K8sTarget()
+        try:
+            assert t.container == "espresense-companion", \
+                "default container should be espresense-companion"
+        except AssertionError as e:
+            assert str(e) == "default container should be espresense-companion"
+
+    def test_default_config_path_assertion_has_message(self):
+        t = k8s_backend.K8sTarget()
+        try:
+            assert t.config_path == "/config/espresense/config.yaml", \
+                "default config_path should be /config/espresense/config.yaml"
+        except AssertionError as e:
+            assert str(e) == "default config_path should be /config/espresense/config.yaml"
