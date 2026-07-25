@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Callable, Optional
 from urllib.parse import urlparse
@@ -11,6 +12,8 @@ try:
     import websocket  # type: ignore
 except ImportError:  # pragma: no cover
     websocket = None  # type: ignore
+
+_logger = logging.getLogger(__name__)
 
 
 def _ws_url(base_url: str, show_all: bool = False) -> str:
@@ -62,13 +65,13 @@ def stream(base_url: str, *, show_all: bool = False,
             if callback:
                 try:
                     callback(event)
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001 - user callback errors must not crash the stream
+                    _logger.warning("stream callback raised; ignored", exc_info=True)
     except KeyboardInterrupt:
         pass
     finally:
         try:
             ws.close()
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - close errors during cleanup must not mask the result
+            _logger.debug("ws.close() failed during cleanup", exc_info=True)
     return collected

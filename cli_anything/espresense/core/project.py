@@ -28,7 +28,7 @@ DEFAULTS: dict[str, Any] = {
     "mqtt_host": None,
     "mqtt_port": 1883,
     "mqtt_username": None,
-    "mqtt_password": None,
+    "mqtt_password": None,  # nosec: B105 - config key name, not a password; value is None
     "mqtt_topic_prefix": "espresense",
     # Per-node HTTP defaults (each node has its own IP)
     "node_http_port": 80,
