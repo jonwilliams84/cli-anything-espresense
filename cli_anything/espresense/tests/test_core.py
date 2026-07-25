@@ -91,9 +91,13 @@ class TestListRooms:
 class TestRename:
     def test_simple_rename(self, parsed):
         summary = rooms_core.rename(parsed, "Kitchen", "Cook Room")
-        assert summary["rooms_renamed"] == 1
-        assert summary["nodes_repointed"] == 1  # kitchen node
-        assert parsed["floors"][0]["rooms"][0]["name"] == "Cook Room"
+        # B101 fix: use pytest.fail instead of assert to prevent removal with -O
+        if summary["rooms_renamed"] != 1:
+            pytest.fail(f"Expected rooms_renamed == 1, got {summary['rooms_renamed']}")
+        if summary["nodes_repointed"] != 1:
+            pytest.fail(f"Expected nodes_repointed == 1, got {summary['nodes_repointed']}")  # kitchen node
+        if parsed["floors"][0]["rooms"][0]["name"] != "Cook Room":
+            pytest.fail(f"Expected room name 'Cook Room', got {parsed['floors'][0]['rooms'][0]['name']}")
         # node's room ref updated too
         kitchen_node = next(n for n in parsed["nodes"] if n["name"] == "kitchen")
         assert kitchen_node["room"] == "Cook Room"
@@ -278,3 +282,39 @@ class TestB101Regression:
                 "noah-bedroom node not assigned to Sophie Bedroom — "
                 "whitespace stripping of node room field may be broken"
             )
+
+    def test_rename_returns_rooms_renamed_count(self, parsed):
+        """Regression for former assert summary["rooms_renamed"] == 1 (line 94).
+
+        Ensures rename returns the correct count of rooms renamed.
+        """
+        summary = rooms_core.rename(parsed, "Kitchen", "Cook Room")
+        expected = 1
+        if summary["rooms_renamed"] != expected:
+            pytest.fail(
+                f"Expected rooms_renamed == {expected}, got {summary['rooms_renamed']}"
+            )
+
+    def test_rename_returns_nodes_repointed_count(self, parsed):
+        """Regression for former assert summary["nodes_repointed"] == 1 (line 95).
+
+        Ensures rename returns the correct count of nodes repointed.
+        """
+        summary = rooms_core.rename(parsed, "Kitchen", "Cook Room")
+        expected = 1  # kitchen node
+        if summary["nodes_repointed"] != expected:
+            pytest.fail(
+                f"Expected nodes_repointed == {expected}, got {summary['nodes_repointed']}"
+            )
+
+    def test_rename_updates_floor_room_name(self, parsed):
+        """Regression for former assert parsed["floors"][0]["rooms"][0]["name"] == "Cook Room" (line 96).
+
+        Ensures the actual room name in the floor data structure is updated.
+        """
+        rooms_core.rename(parsed, "Kitchen", "Cook Room")
+        actual = parsed["floors"][0]["rooms"][0]["name"]
+        expected = "Cook Room"
+        if actual != expected:
+            pytest.fail(f"Expected room name '{expected}', got '{actual}'")
+
