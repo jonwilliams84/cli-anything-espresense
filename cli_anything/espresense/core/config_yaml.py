@@ -29,8 +29,9 @@ def fetch_yaml(target: k8s_backend.K8sTarget) -> tuple[str, Any]:
     return raw, parsed
 
 
-def push_yaml(target: k8s_backend.K8sTarget, parsed: Any, *,
-              restart: bool = False, backup: bool = True) -> dict:
+def push_yaml(
+    target: k8s_backend.K8sTarget, parsed: Any, *, restart: bool = False, backup: bool = True
+) -> dict:
     """Serialize and push a modified config back to the pod.
 
     Returns a small summary dict (bytes written, restart status, etc).

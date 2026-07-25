@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from pathlib import Path
-from typing import Optional
 
 import click
 
@@ -30,6 +28,7 @@ CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 
 # ──────────────────────────────────────────────────────── helpers
+
 
 def make_client(ctx: click.Context) -> CompanionClient:
     obj = ctx.obj
@@ -115,26 +114,52 @@ def _abort(message: str) -> None:
 
 # ──────────────────────────────────────────────────────── root
 
+
 @click.group(context_settings=CONTEXT_SETTINGS, invoke_without_command=True)
-@click.option("--base-url", default=None,
-              help="Companion HTTP base URL (default http://localhost:8267)")
+@click.option(
+    "--base-url", default=None, help="Companion HTTP base URL (default http://localhost:8267)"
+)
 @click.option("--timeout", default=None, type=int, help="HTTP timeout in seconds (default 30)")
-@click.option("--verify-ssl/--no-verify-ssl", default=None,
-              help="Verify TLS cert (default: on)")
+@click.option("--verify-ssl/--no-verify-ssl", default=None, help="Verify TLS cert (default: on)")
 @click.option("--k8s-namespace", default=None, help="Kubernetes namespace (default espresense)")
-@click.option("--k8s-deployment", default=None,
-              help="Companion deployment name (default espresense-companion)")
-@click.option("--k8s-container", default=None,
-              help="Container name inside the pod (default espresense-companion)")
-@click.option("--k8s-config-path", default=None,
-              help="Path to config.yaml inside the pod (default /config/espresense/config.yaml)")
-@click.option("--config", "config_path", default=None, type=click.Path(),
-              help="Path to connection profile (default ~/.config/cli-anything-espresense.json)")
-@click.option("--json", "as_json", is_flag=True, default=False,
-              help="Emit machine-readable JSON output")
+@click.option(
+    "--k8s-deployment",
+    default=None,
+    help="Companion deployment name (default espresense-companion)",
+)
+@click.option(
+    "--k8s-container",
+    default=None,
+    help="Container name inside the pod (default espresense-companion)",
+)
+@click.option(
+    "--k8s-config-path",
+    default=None,
+    help="Path to config.yaml inside the pod (default /config/espresense/config.yaml)",
+)
+@click.option(
+    "--config",
+    "config_path",
+    default=None,
+    type=click.Path(),
+    help="Path to connection profile (default ~/.config/cli-anything-espresense.json)",
+)
+@click.option(
+    "--json", "as_json", is_flag=True, default=False, help="Emit machine-readable JSON output"
+)
 @click.pass_context
-def cli(ctx, base_url, timeout, verify_ssl, k8s_namespace, k8s_deployment,
-        k8s_container, k8s_config_path, config_path, as_json):
+def cli(
+    ctx,
+    base_url,
+    timeout,
+    verify_ssl,
+    k8s_namespace,
+    k8s_deployment,
+    k8s_container,
+    k8s_config_path,
+    config_path,
+    as_json,
+):
     """cli-anything-espresense — control ESPresense (companion + per-node firmware)."""
     ctx.ensure_object(dict)
     cfg_path_obj = Path(config_path).expanduser() if config_path else None
@@ -158,6 +183,7 @@ def cli(ctx, base_url, timeout, verify_ssl, k8s_namespace, k8s_deployment,
 
 # ──────────────────────────────────────────────────────── config (profile)
 
+
 @cli.group()
 def config():
     """Manage the local connection profile (~/.config/cli-anything-espresense.json)."""
@@ -167,8 +193,7 @@ def config():
 @click.pass_context
 def config_show(ctx):
     """Print the resolved profile (merged file + env + flags)."""
-    safe = {k: v for k, v in ctx.obj.items()
-            if k not in ("config_path", "as_json")}
+    safe = {k: v for k, v in ctx.obj.items() if k not in ("config_path", "as_json")}
     emit(ctx, safe)
 
 
@@ -176,13 +201,13 @@ def config_show(ctx):
 @click.pass_context
 def config_save(ctx):
     """Write the current resolved profile back to disk."""
-    safe = {k: v for k, v in ctx.obj.items()
-            if k not in ("config_path", "as_json")}
+    safe = {k: v for k, v in ctx.obj.items() if k not in ("config_path", "as_json")}
     out = project.save_config(safe, ctx.obj.get("config_path"))
     emit(ctx, {"saved": str(out)})
 
 
 # ──────────────────────────────────────────────────────── companion
+
 
 @cli.group()
 def companion():
@@ -221,21 +246,29 @@ def companion_info(ctx):
         _abort(str(exc))
         return
     online = sum(1 for n in nodes if n.get("online"))
-    emit(ctx, {
-        "companion_url": ctx.obj["base_url"],
-        "node_count": len(nodes),
-        "online": online,
-        "offline": len(nodes) - online,
-        "device_track_count": len(cfg.get("devices") or []),
-        "calibration_r": cal.get("r") if isinstance(cal, dict) else None,
-        "calibration_rmse": cal.get("rmse") if isinstance(cal, dict) else None,
-        "optimization_enabled": (cfg.get("optimization") or {}).get("enabled"),
-    })
+    emit(
+        ctx,
+        {
+            "companion_url": ctx.obj["base_url"],
+            "node_count": len(nodes),
+            "online": online,
+            "offline": len(nodes) - online,
+            "device_track_count": len(cfg.get("devices") or []),
+            "calibration_r": cal.get("r") if isinstance(cal, dict) else None,
+            "calibration_rmse": cal.get("rmse") if isinstance(cal, dict) else None,
+            "optimization_enabled": (cfg.get("optimization") or {}).get("enabled"),
+        },
+    )
 
 
 @companion.command("config-get")
-@click.option("--format", "fmt", default="yaml", type=click.Choice(["yaml", "json"]),
-              help="Output format (default yaml from /api/state/config)")
+@click.option(
+    "--format",
+    "fmt",
+    default="yaml",
+    type=click.Choice(["yaml", "json"]),
+    help="Output format (default yaml from /api/state/config)",
+)
 @click.pass_context
 def companion_config_get(ctx, fmt):
     """Fetch the running companion's parsed config (read-only via API)."""
@@ -245,12 +278,12 @@ def companion_config_get(ctx, fmt):
         click.echo(json.dumps(cfg, indent=2, default=str))
     else:
         from cli_anything.espresense.utils import yaml_io
+
         click.echo(yaml_io.dumps(cfg))
 
 
 @companion.command("config-fetch")
-@click.option("-o", "--out", type=click.Path(),
-              help="Write to file instead of stdout")
+@click.option("-o", "--out", type=click.Path(), help="Write to file instead of stdout")
 @click.pass_context
 def companion_config_fetch(ctx, out):
     """Fetch the on-disk config.yaml from the pod (with comments/order preserved)."""
@@ -265,10 +298,12 @@ def companion_config_fetch(ctx, out):
 
 @companion.command("config-push")
 @click.argument("file", type=click.Path(exists=True, dir_okay=False))
-@click.option("--no-backup", is_flag=True,
-              help="Don't leave a timestamped .bak in the pod (default: do)")
-@click.option("--restart", is_flag=True,
-              help="Rollout-restart the companion deployment after writing")
+@click.option(
+    "--no-backup", is_flag=True, help="Don't leave a timestamped .bak in the pod (default: do)"
+)
+@click.option(
+    "--restart", is_flag=True, help="Rollout-restart the companion deployment after writing"
+)
 @click.pass_context
 def companion_config_push(ctx, file, no_backup, restart):
     """Push a local YAML file to the pod's config.yaml. Optionally restart."""
@@ -283,10 +318,8 @@ def companion_config_push(ctx, file, no_backup, restart):
 
 
 @companion.command("restart")
-@click.option("--wait/--no-wait", default=True,
-              help="Wait for rollout to complete (default: wait)")
-@click.option("--timeout", default="120s",
-              help="kubectl rollout timeout (default 120s)")
+@click.option("--wait/--no-wait", default=True, help="Wait for rollout to complete (default: wait)")
+@click.option("--timeout", default="120s", help="kubectl rollout timeout (default 120s)")
 @click.pass_context
 def companion_restart(ctx, wait, timeout):
     """Trigger a rolling restart of the companion deployment."""
@@ -300,8 +333,7 @@ def companion_restart(ctx, wait, timeout):
 
 @companion.command("stream")
 @click.option("--duration", default=10.0, type=float, help="Seconds to listen (default 10)")
-@click.option("--type", "types", multiple=True,
-              help="Filter to specific event types (repeatable)")
+@click.option("--type", "types", multiple=True, help="Filter to specific event types (repeatable)")
 @click.option("--show-all", is_flag=True, help="Include all devices, not just tracked")
 @click.pass_context
 def companion_stream(ctx, duration, types, show_all):
@@ -317,6 +349,7 @@ def companion_stream(ctx, duration, types, show_all):
 
 
 # ──────────────────────────────────────────────────────── rooms
+
 
 @cli.group()
 def rooms():
@@ -337,10 +370,12 @@ def rooms_list(ctx, floor):
 @rooms.command("rename")
 @click.argument("old")
 @click.argument("new")
-@click.option("--restart/--no-restart", default=False,
-              help="Restart the companion afterwards (default: no — review first)")
-@click.option("--dry-run", is_flag=True,
-              help="Show the proposed edits without writing")
+@click.option(
+    "--restart/--no-restart",
+    default=False,
+    help="Restart the companion afterwards (default: no — review first)",
+)
+@click.option("--dry-run", is_flag=True, help="Show the proposed edits without writing")
 @click.pass_context
 def rooms_rename(ctx, old, new, restart, dry_run):
     """Rename ONE room polygon AND all nodes that referenced it.
@@ -352,21 +387,28 @@ def rooms_rename(ctx, old, new, restart, dry_run):
     _, parsed = config_core.fetch_yaml(target)
     summary = rooms_core.rename(parsed, old, new)
     summary["dry_run"] = dry_run
-    if not dry_run and (summary["rooms_renamed"] > 0
-                          or summary["nodes_repointed"] > 0
-                          or summary["whitespace_fixes"] > 0):
+    if not dry_run and (
+        summary["rooms_renamed"] > 0
+        or summary["nodes_repointed"] > 0
+        or summary["whitespace_fixes"] > 0
+    ):
         push = config_core.push_yaml(target, parsed, restart=restart)
         summary["pushed"] = push
     emit(ctx, summary)
 
 
 @rooms.command("rotate")
-@click.option("--map", "mappings", multiple=True, required=True,
-              help="old=new (repeatable). Applied atomically — supports swaps & cycles.")
-@click.option("--restart/--no-restart", default=False,
-              help="Restart the companion afterwards (default: no)")
-@click.option("--dry-run", is_flag=True,
-              help="Show the proposed edits without writing")
+@click.option(
+    "--map",
+    "mappings",
+    multiple=True,
+    required=True,
+    help="old=new (repeatable). Applied atomically — supports swaps & cycles.",
+)
+@click.option(
+    "--restart/--no-restart", default=False, help="Restart the companion afterwards (default: no)"
+)
+@click.option("--dry-run", is_flag=True, help="Show the proposed edits without writing")
 @click.pass_context
 def rooms_rotate(ctx, mappings, restart, dry_run):
     """Apply N room renames atomically. Use for swaps and rotations.
@@ -416,16 +458,23 @@ def rooms_repoint(ctx, node_name, room_name, restart, dry_run):
 
 # ──────────────────────────────────────────────────────── nodes (companion view)
 
+
 @cli.group()
 def nodes():
     """List, rename, configure nodes via the companion (config.yaml + API)."""
 
 
 @nodes.command("list")
-@click.option("--merge-live/--no-merge-live", default=True,
-              help="Join config rows with live state from the API (default: yes)")
-@click.option("--include-telemetry/--no-include-telemetry", default=True,
-              help="Include telemetry when calling the live API (default: yes)")
+@click.option(
+    "--merge-live/--no-merge-live",
+    default=True,
+    help="Join config rows with live state from the API (default: yes)",
+)
+@click.option(
+    "--include-telemetry/--no-include-telemetry",
+    default=True,
+    help="Include telemetry when calling the live API (default: yes)",
+)
 @click.pass_context
 def nodes_list(ctx, merge_live, include_telemetry):
     """List nodes — by default merges config.yaml with live API state."""
@@ -541,6 +590,7 @@ def nodes_put_settings(ctx, node_id, settings_json):
 
 # ──────────────────────────────────────────────────────── node (direct HTTP to one ESP)
 
+
 @cli.group()
 def node():
     """Talk directly to one ESP node by IP/hostname (firmware web server)."""
@@ -574,9 +624,12 @@ def node_restart(ctx, host):
 
 @node.command("settings")
 @click.argument("host")
-@click.option("--section", default="extras",
-              type=click.Choice(["main", "extras", "hardware"]),
-              help="Settings page: main=wifi/mqtt, extras=BLE, hardware=sensors")
+@click.option(
+    "--section",
+    default="extras",
+    type=click.Choice(["main", "extras", "hardware"]),
+    help="Settings page: main=wifi/mqtt, extras=BLE, hardware=sensors",
+)
 @click.pass_context
 def node_settings(ctx, host, section):
     """GET /wifi/<section> on the node — read settings as JSON."""
@@ -586,8 +639,7 @@ def node_settings(ctx, host, section):
 @node.command("set")
 @click.argument("host")
 @click.argument("fields", nargs=-1)
-@click.option("--section", default="extras",
-              type=click.Choice(["main", "extras", "hardware"]))
+@click.option("--section", default="extras", type=click.Choice(["main", "extras", "hardware"]))
 @click.pass_context
 def node_set(ctx, host, fields, section):
     """POST settings on the node. Pass key=value pairs as positional args.
@@ -622,7 +674,10 @@ def node_rename(ctx, host, new_name):
 @node.command("scan-wifi")
 @click.argument("host")
 @click.pass_context
-def node_scan_wifi(ctx, host, ):
+def node_scan_wifi(
+    ctx,
+    host,
+):
     emit(ctx, _node_client(ctx, host).scan_wifi())
 
 
@@ -636,6 +691,7 @@ def node_devices(ctx, host):
 
 
 # ──────────────────────────────────────────────────────── devices (companion view)
+
 
 @cli.group()
 def devices():
@@ -669,8 +725,13 @@ def devices_show(ctx, device_id):
 def devices_set(ctx, device_id, name, ref_rssi, anchor_x, anchor_y, anchor_z):
     client = make_client(ctx)
     out = devices_core.update_device(
-        client, device_id, name=name, ref_rssi=ref_rssi,
-        anchored_x=anchor_x, anchored_y=anchor_y, anchored_z=anchor_z,
+        client,
+        device_id,
+        name=name,
+        ref_rssi=ref_rssi,
+        anchored_x=anchor_x,
+        anchored_y=anchor_y,
+        anchored_z=anchor_z,
     )
     emit(ctx, {"device_id": device_id, "result": out or "no fields"})
 
@@ -686,6 +747,7 @@ def devices_delete(ctx, device_id):
 
 
 # ──────────────────────────────────────────────────────── calibration
+
 
 @cli.group()
 def calibration():
@@ -727,6 +789,7 @@ def calibration_auto(ctx, state):
 
 # ──────────────────────────────────────────────────────── history
 
+
 @cli.group()
 def history():
     """Device-position history."""
@@ -747,6 +810,7 @@ def history_get(ctx, device_id, start, end, limit):
 
 
 # ──────────────────────────────────────────────────────── mqtt
+
 
 @cli.group()
 def mqtt():
@@ -772,17 +836,21 @@ def _mqtt_args(ctx) -> dict:
 @click.argument("node_id")
 @click.argument("key")
 @click.argument("value")
-@click.option("--retain/--no-retain", default=True,
-              help="Retain the message on the broker (default: yes)")
+@click.option(
+    "--retain/--no-retain", default=True, help="Retain the message on the broker (default: yes)"
+)
 @click.option("--prefix", default=None, help="Topic prefix (default: espresense)")
 @click.pass_context
 def mqtt_set_node(ctx, node_id, key, value, retain, prefix):
     """Publish a per-node setting: espresense/rooms/<id>/<key>/set"""
     kw = _mqtt_args(ctx)
     out = mqtt_core.publish_setting(
-        node_id=node_id, key=key, value=value,
+        node_id=node_id,
+        key=key,
+        value=value,
         prefix=prefix or ctx.obj.get("mqtt_topic_prefix", "espresense"),
-        retain=retain, **kw,
+        retain=retain,
+        **kw,
     )
     emit(ctx, out)
 
@@ -801,8 +869,9 @@ def mqtt_pub(ctx, topic, payload, retain):
 
 @mqtt.command("watch")
 @click.argument("topic_filter")
-@click.option("--duration", default=None, type=float,
-              help="Seconds to listen (default: until Ctrl-C)")
+@click.option(
+    "--duration", default=None, type=float, help="Seconds to listen (default: until Ctrl-C)"
+)
 @click.pass_context
 def mqtt_watch(ctx, topic_filter, duration):
     """Subscribe to a topic pattern and print/collect messages.
@@ -814,12 +883,15 @@ def mqtt_watch(ctx, topic_filter, duration):
         records = mqtt_core.watch(topic_filter=topic_filter, duration=duration, **kw)
         emit(ctx, records)
         return
+
     def _print(topic, payload):
         click.echo(f"{topic}\t{payload}")
+
     mqtt_core.watch(topic_filter=topic_filter, duration=duration, callback=_print, **kw)
 
 
 # ──────────────────────────────────────────────────────── REPL
+
 
 @cli.command()
 @click.pass_context
@@ -850,6 +922,7 @@ def repl(ctx):
             skin.help(cli.commands)
             continue
         import shlex
+
         argv = shlex.split(line)
         try:
             cli.main(args=argv, standalone_mode=False, prog_name="(espresense)")
@@ -860,6 +933,7 @@ def repl(ctx):
 
 
 # ──────────────────────────────────────────────────────── entry
+
 
 def main():
     cli(obj={})

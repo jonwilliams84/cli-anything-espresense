@@ -14,6 +14,7 @@ from cli_anything.espresense.utils.companion_client import CompanionClient
 
 # ── state ────────────────────────────────────────────────────────────────────
 
+
 def get_config(client: CompanionClient) -> dict:
     """The full parsed YAML config (read-only via API)."""
     return client.get("/api/state/config")
@@ -49,6 +50,7 @@ def set_auto_optimize(client: CompanionClient, enabled: bool) -> dict:
 
 # ── nodes ────────────────────────────────────────────────────────────────────
 
+
 def get_node(client: CompanionClient, node_id: str) -> dict:
     return client.get(f"/api/node/{node_id}")
 
@@ -71,6 +73,7 @@ def delete_node(client: CompanionClient, node_id: str) -> Any:
 
 # ── devices ──────────────────────────────────────────────────────────────────
 
+
 def get_device(client: CompanionClient, device_id: str) -> dict:
     return client.get(f"/api/device/{device_id}")
 
@@ -85,8 +88,10 @@ def delete_device(client: CompanionClient, device_id: str) -> Any:
 
 # ── history ──────────────────────────────────────────────────────────────────
 
-def get_device_history(client: CompanionClient, device_id: str,
-                       start: Optional[str] = None, end: Optional[str] = None) -> dict:
+
+def get_device_history(
+    client: CompanionClient, device_id: str, start: Optional[str] = None, end: Optional[str] = None
+) -> dict:
     if start or end:
         params = {}
         if start:
@@ -98,6 +103,7 @@ def get_device_history(client: CompanionClient, device_id: str,
 
 
 # ── firmware ─────────────────────────────────────────────────────────────────
+
 
 def list_firmware_types(client: CompanionClient) -> dict:
     return client.get("/api/firmware/types")

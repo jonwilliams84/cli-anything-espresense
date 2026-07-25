@@ -27,8 +27,7 @@ def summary(client: CompanionClient) -> dict:
     cal = get(client)
     matrix = cal.get("matrix") if isinstance(cal, dict) else None
     if matrix is None:
-        return {"r": cal.get("r"), "rmse": cal.get("rmse"),
-                 "pair_count": 0}
+        return {"r": cal.get("r"), "rmse": cal.get("rmse"), "pair_count": 0}
     pair_count = 0
     if isinstance(matrix, dict):
         for v in matrix.values():

@@ -24,10 +24,14 @@ def _ws_url(base_url: str, show_all: bool = False) -> str:
     return f"{scheme}://{netloc}/ws{query}"
 
 
-def stream(base_url: str, *, show_all: bool = False,
-           duration: Optional[float] = None,
-           types: Optional[set[str]] = None,
-           callback: Optional[Callable[[dict], None]] = None) -> list[dict]:
+def stream(
+    base_url: str,
+    *,
+    show_all: bool = False,
+    duration: Optional[float] = None,
+    types: Optional[set[str]] = None,
+    callback: Optional[Callable[[dict], None]] = None,
+) -> list[dict]:
     """Connect to /ws and collect events.
 
     types: set of event `type` values to keep ({"deviceChanged", "nodeStateChanged"}).
@@ -65,13 +69,13 @@ def stream(base_url: str, *, show_all: bool = False,
             if callback:
                 try:
                     callback(event)
-                except Exception:  # noqa: BLE001 - user callback errors must not crash the stream
+                except Exception:
                     _logger.warning("stream callback raised; ignored", exc_info=True)
     except KeyboardInterrupt:
         pass
     finally:
         try:
             ws.close()
-        except Exception:  # noqa: BLE001 - close errors during cleanup must not mask the result
+        except Exception:
             _logger.debug("ws.close() failed during cleanup", exc_info=True)
     return collected

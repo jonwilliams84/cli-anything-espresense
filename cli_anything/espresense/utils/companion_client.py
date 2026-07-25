@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json as _json
 from typing import Any, Optional
-from urllib.parse import urljoin
 
 import requests
 
@@ -67,9 +66,7 @@ class CompanionClient:
             raise CompanionError(f"{method} {url} failed: {exc}") from exc
         if resp.status_code >= 400:
             body = resp.text[:500] if resp.text else ""
-            raise CompanionError(
-                f"{method} {url} -> {resp.status_code}: {body}"
-            )
+            raise CompanionError(f"{method} {url} -> {resp.status_code}: {body}")
         return resp
 
     # ---------------------------------------------------------------- convenience

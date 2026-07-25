@@ -24,15 +24,17 @@ def list_rooms(parsed: Any, floor_id: Optional[str] = None) -> list[dict]:
         for room in fl.get("rooms") or []:
             name = room.get("name")
             nodes_in = _nodes_assigned_to(parsed, name)
-            out.append({
-                "floor_id": fid,
-                "floor_name": fname,
-                "room_name": name,
-                "point_count": len(room.get("points") or []),
-                "has_color": "color" in room,
-                "node_count": len(nodes_in),
-                "node_names": [n.get("name") for n in nodes_in],
-            })
+            out.append(
+                {
+                    "floor_id": fid,
+                    "floor_name": fname,
+                    "room_name": name,
+                    "point_count": len(room.get("points") or []),
+                    "has_color": "color" in room,
+                    "node_count": len(nodes_in),
+                    "node_names": [n.get("name") for n in nodes_in],
+                }
+            )
     return out
 
 
@@ -45,15 +47,13 @@ def _nodes_assigned_to(parsed: Any, room_name: str) -> list[dict]:
     return out
 
 
-def rename(parsed: Any, old: str, new: str, *,
-           strip_node_whitespace: bool = True) -> dict:
+def rename(parsed: Any, old: str, new: str, *, strip_node_whitespace: bool = True) -> dict:
     """Rename one room. Updates all nodes that referenced `old`.
 
     Returns {floor_id, rooms_renamed, nodes_repointed, whitespace_fixes}.
     """
     if old == new:
-        return {"rooms_renamed": 0, "nodes_repointed": 0,
-                "whitespace_fixes": 0, "floor_id": None}
+        return {"rooms_renamed": 0, "nodes_repointed": 0, "whitespace_fixes": 0, "floor_id": None}
     floor_id = None
     rooms_renamed = 0
     for fl in parsed.get("floors") or []:
@@ -84,8 +84,7 @@ def rename(parsed: Any, old: str, new: str, *,
     }
 
 
-def rotate(parsed: Any, mapping: dict[str, str], *,
-           strip_node_whitespace: bool = True) -> dict:
+def rotate(parsed: Any, mapping: dict[str, str], *, strip_node_whitespace: bool = True) -> dict:
     """Apply many renames atomically (in-memory, then return).
 
     Useful for room swaps: e.g. {"A":"B", "B":"A"} works without collision.
@@ -110,15 +109,15 @@ def rotate(parsed: Any, mapping: dict[str, str], *,
 
     # Pass 1: old -> sentinel
     for old in olds:
-        r = rename(parsed, old, sentinels[old],
-                   strip_node_whitespace=strip_node_whitespace)
+        r = rename(parsed, old, sentinels[old], strip_node_whitespace=strip_node_whitespace)
         whitespace_fixes += r["whitespace_fixes"]
-        per_mapping[old] = {"rooms_renamed_p1": r["rooms_renamed"],
-                             "nodes_repointed_p1": r["nodes_repointed"]}
+        per_mapping[old] = {
+            "rooms_renamed_p1": r["rooms_renamed"],
+            "nodes_repointed_p1": r["nodes_repointed"],
+        }
     # Pass 2: sentinel -> new
     for old, new in mapping.items():
-        r = rename(parsed, sentinels[old], new,
-                   strip_node_whitespace=False)  # already stripped
+        r = rename(parsed, sentinels[old], new, strip_node_whitespace=False)  # already stripped
         per_mapping[old]["rooms_renamed_p2"] = r["rooms_renamed"]
         per_mapping[old]["nodes_repointed_p2"] = r["nodes_repointed"]
         per_mapping[old]["new"] = new
