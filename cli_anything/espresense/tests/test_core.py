@@ -120,8 +120,10 @@ class TestRename:
 
     def test_rename_noop(self, parsed):
         summary = rooms_core.rename(parsed, "Spare Room", "Spare Room")
-        assert summary["rooms_renamed"] == 0
-        assert summary["nodes_repointed"] == 0
+        if summary["rooms_renamed"] != 0:
+            pytest.fail("Expected rooms_renamed == 0 for no-op rename")
+        if summary["nodes_repointed"] != 0:
+            pytest.fail("Expected nodes_repointed == 0 for no-op rename")
 
 
 # ── rooms.rotate ────────────────────────────────────────────────────────────
@@ -137,9 +139,8 @@ class TestRotate:
         })
         # All three should have rotated
         names = [r["name"] for r in parsed["floors"][1]["rooms"]]
-        assert sorted(names) == sorted(
-            ["Noah Bedroom", "Sophie Bedroom", "Spare Room", "Master Bedroom"]
-        )
+        if sorted(names) != sorted(["Noah Bedroom", "Sophie Bedroom", "Spare Room", "Master Bedroom"]):
+            pytest.fail("Expected rotated room names after three-way cycle")
         # Floor index 0 -> originally "Spare Room", now "Noah Bedroom"
         assert parsed["floors"][1]["rooms"][0]["name"] == "Noah Bedroom"
         assert parsed["floors"][1]["rooms"][1]["name"] == "Sophie Bedroom"
