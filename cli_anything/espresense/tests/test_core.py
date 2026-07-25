@@ -68,10 +68,10 @@ def parsed():
 class TestListRooms:
     def test_all_floors(self, parsed):
         rows = rooms_core.list_rooms(parsed)
-        assert len(rows) == 6, "Expected 6 rooms across all floors"  # nosec: B101 — test-only; pytest never runs with -O in CI/production
+        if len(rows) != 6: pytest.fail("Expected 6 rooms across all floors")
         names = [r["room_name"] for r in rows]
-        assert "Kitchen" in names, "Kitchen should appear in room list"  # nosec: B101 — test-only; pytest never runs with -O in CI/production
-        assert "Sophie Bedroom" in names, "Sophie Bedroom should appear in room list"  # nosec: B101 — test-only; pytest never runs with -O in CI/production
+        if "Kitchen" not in names: pytest.fail("Kitchen should appear in room list")
+        if "Sophie Bedroom" not in names: pytest.fail("Sophie Bedroom should appear in room list")
 
     def test_floor_filter(self, parsed):
         rows = rooms_core.list_rooms(parsed, floor_id="first")
