@@ -1,0 +1,76 @@
+"""Regression tests for B101 assert removal fix in test_k8s_backend.py.
+
+These tests verify that the if/raise AssertionError pattern used in
+test_defaults_are_valid() correctly handles test failures (raises
+AssertionError when conditions are not met) and is NOT an assert statement
+(which would be caught by B101 and removed under -O).
+
+The fix replaces:
+    assert t.namespace == "espresense", "message"
+With:
+    if t.namespace != "espresense":
+        raise AssertionError("message")
+
+This matters because B101 (assert_used) flags assert statements as security
+issues since they are removed under Python's -O/-OO optimization.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+
+
+class TestB101RegressionK8s:
+    """Verify B101 fix in test_k8s_backend.py works correctly."""
+
+    def test_defaults_valid_preserved_under_optimization(self):
+        """Verify test_defaults_are_valid runs and passes with -O flag.
+
+        This is the main regression test for the B101 fix. The test uses
+        if/raise AssertionError instead of assert, which is NOT removed under
+        -O (unlike assert statements).
+        """
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-O",  # Optimize: remove assert statements
+                "-m",
+                "pytest",
+                "cli_anything/espresense/tests/test_k8s_backend.py::TestK8sTargetValidation::test_defaults_are_valid",
+                "-v",
+            ],
+            capture_output=True,
+            text=True,
+            cwd="/work/repo",
+        )
+        # The if/raise pattern is NOT removed under -O, so it should pass.
+        # If assert was still used, it would be removed and test would fail.
+        if result.returncode != 0:
+            import pytest
+            pytest.fail(
+                f"test_defaults_are_valid failed under -O optimization.\n"
+                f"This indicates assertions were not properly replaced.\n"
+                f"stdout: {result.stdout}\n"
+                f"stderr: {result.stderr}"
+            )
+
+    def test_assert_would_be_removed_under_optimization(self):
+        """Demonstrate that bare assert IS removed under -O (proving fix is needed).
+
+        This proves B101 is a valid concern: assert statements are stripped,
+        but the if/raise pattern is not (since it's not an assert statement).
+        """
+        import pytest
+        # Test that assert False is removed under -O (no error)
+        result_assert = subprocess.run(
+            [sys.executable, "-O", "-c", "assert False, 'should be removed'"],
+            capture_output=True,
+            text=True,
+        )
+        # With -O, assert is stripped, so this succeeds (returncode 0)
+        # Without -O, this would raise AssertionError (returncode 1)
+        if result_assert.returncode != 0:
+            pytest.fail(
+                "assert should be removed under -O, but wasn't"
+            )

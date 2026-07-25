@@ -20,10 +20,14 @@ class TestK8sTargetValidation:
 
     def test_defaults_are_valid(self):
         t = k8s_backend.K8sTarget()
-        assert t.namespace == "espresense", "default namespace should be espresense"
-        assert t.deployment == "espresense-companion", "default deployment should be espresense-companion"
-        assert t.container == "espresense-companion", "default container should be espresense-companion"
-        assert t.config_path == "/config/espresense/config.yaml", "default config_path should be /config/espresense/config.yaml"
+        if t.namespace != "espresense":
+            raise AssertionError("default namespace should be espresense")
+        if t.deployment != "espresense-companion":
+            raise AssertionError("default deployment should be espresense-companion")
+        if t.container != "espresense-companion":
+            raise AssertionError("default container should be espresense-companion")
+        if t.config_path != "/config/espresense/config.yaml":
+            raise AssertionError("default config_path should be /config/espresense/config.yaml")
 
     @pytest.mark.parametrize(
         "field,value",
