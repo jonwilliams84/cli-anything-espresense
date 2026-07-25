@@ -105,3 +105,61 @@ class TestB101RegressionK8s:
                 tester.test_defaults_are_valid()
         finally:
             k8s_backend.K8sTarget = original
+
+
+class TestB101RegressionK8sAllFields:
+    """Verify each if/raise guard in test_defaults_are_valid fires independently.
+
+    The original B101 fix replaced 4 assert statements (lines 23-26) with
+    if/raise AssertionError.  The existing TestB101RegressionK8s only covers
+    the namespace field.  These tests cover the remaining 3 fields
+    (deployment, container, config_path) to ensure every guard is a real
+    runtime check that survives -O optimization.
+    """
+
+    def _run_with_fake_target(self, fake_target_cls, expected_match):
+        """Helper: patch K8sTarget, run test_defaults_are_valid, expect AssertionError."""
+        import pytest
+        from cli_anything.espresense.core import k8s_backend
+        from cli_anything.espresense.tests.test_k8s_backend import (
+            TestK8sTargetValidation,
+        )
+
+        tester = TestK8sTargetValidation()
+        original = k8s_backend.K8sTarget
+        k8s_backend.K8sTarget = fake_target_cls
+        try:
+            with pytest.raises(AssertionError, match=expected_match):
+                tester.test_defaults_are_valid()
+        finally:
+            k8s_backend.K8sTarget = original
+
+    def test_if_raise_fires_on_wrong_deployment(self):
+        """The deployment guard must raise AssertionError when wrong."""
+        class FakeTarget:
+            namespace = "espresense"
+            deployment = "wrong-deployment"
+            container = "espresense-companion"
+            config_path = "/config/espresense/config.yaml"
+
+        self._run_with_fake_target(FakeTarget, "deployment")
+
+    def test_if_raise_fires_on_wrong_container(self):
+        """The container guard must raise AssertionError when wrong."""
+        class FakeTarget:
+            namespace = "espresense"
+            deployment = "espresense-companion"
+            container = "wrong-container"
+            config_path = "/config/espresense/config.yaml"
+
+        self._run_with_fake_target(FakeTarget, "container")
+
+    def test_if_raise_fires_on_wrong_config_path(self):
+        """The config_path guard must raise AssertionError when wrong."""
+        class FakeTarget:
+            namespace = "espresense"
+            deployment = "espresense-companion"
+            container = "espresense-companion"
+            config_path = "/wrong/path/config.yaml"
+
+        self._run_with_fake_target(FakeTarget, "config_path")
