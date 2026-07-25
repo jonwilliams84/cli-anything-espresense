@@ -100,19 +100,23 @@ class TestRename:
             pytest.fail(f"Expected room name 'Cook Room', got {parsed['floors'][0]['rooms'][0]['name']}")
         # node's room ref updated too
         kitchen_node = next(n for n in parsed["nodes"] if n["name"] == "kitchen")
-        assert kitchen_node["room"] == "Cook Room"
+        if kitchen_node["room"] != "Cook Room":
+            pytest.fail(f"Expected kitchen node room == 'Cook Room', got {kitchen_node['room']}")
 
     def test_rename_strips_node_whitespace_globally(self, parsed):
         summary = rooms_core.rename(parsed, "Sophie Bedroom", "Sophie Bedroom NEW")
         # `noah-bedroom` had room "Sophie Bedroom " with trailing space; after
         # strip and rename it should now point to "Sophie Bedroom NEW".
         noah = next(n for n in parsed["nodes"] if n["name"] == "noah-bedroom")
-        assert noah["room"] == "Sophie Bedroom NEW"
+        if noah["room"] != "Sophie Bedroom NEW":
+            pytest.fail(f"Expected noah node room == 'Sophie Bedroom NEW', got {noah['room']}")
         # And `bedroom` node had room "Master Bedroom " — whitespace stripped
         # but value not renamed (since we renamed Sophie Bedroom only).
         bedroom = next(n for n in parsed["nodes"] if n["name"] == "bedroom")
-        assert bedroom["room"] == "Master Bedroom"
-        assert summary["whitespace_fixes"] >= 2
+        if bedroom["room"] != "Master Bedroom":
+            pytest.fail(f"Expected bedroom node room == 'Master Bedroom', got {bedroom['room']}")
+        if summary["whitespace_fixes"] < 2:
+            pytest.fail(f"Expected whitespace_fixes >= 2, got {summary['whitespace_fixes']}")
 
     def test_rename_noop(self, parsed):
         summary = rooms_core.rename(parsed, "Spare Room", "Spare Room")
