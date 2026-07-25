@@ -154,17 +154,17 @@ class TestRotate:
         n_spare = next(n for n in parsed["nodes"] if n["name"] == "spare-room")
         # noah-bedroom's room was "Sophie Bedroom" (with trailing space, stripped),
         # which rotated -> "Spare Room"
-        if n_noah["room"] != "Spare Room":
-            pytest.fail(f"Expected n_noah['room'] == 'Spare Room', got {n_noah["room"]}")
+        if n_noah['room'] != "Spare Room":
+            pytest.fail(f"Expected n_noah['room'] == 'Spare Room', got {n_noah['room']}")
         # sophie-bedroom's room was "Spare Room" -> rotated to "Noah Bedroom"
-        if n_sophie["room"] != "Noah Bedroom":
-            pytest.fail(f"Expected n_sophie['room'] == 'Noah Bedroom', got {n_sophie["room"]}")
+        if n_sophie['room'] != "Noah Bedroom":
+            pytest.fail(f"Expected n_sophie['room'] == 'Noah Bedroom', got {n_sophie['room']}")
         # spare-room's room was "Noah Bedroom" -> rotated to "Sophie Bedroom"
-        if n_spare["room"] != "Sophie Bedroom":
-            pytest.fail(f"Expected n_spare['room'] == 'Sophie Bedroom', got {n_spare["room"]}")
+        if n_spare['room'] != "Sophie Bedroom":
+            pytest.fail(f"Expected n_spare['room'] == 'Sophie Bedroom', got {n_spare['room']}")
         # Master Bedroom node should be untouched
         n_master = next(n for n in parsed["nodes"] if n["name"] == "bedroom")
-        assert n_master["room"] == "Master Bedroom" # nosec: B101 - assert used in test for correctness, not security
+        if not n_master['room'] == "Master Bedroom": pytest.fail("Assertion failed")
 
     def test_rotate_rejects_duplicate_new(self, parsed):
         # dict literals can't have duplicate keys, so only `new` collisions
@@ -178,14 +178,14 @@ class TestRotate:
 class TestRepointNode:
     def test_found(self, parsed):
         out = rooms_core.repoint_node(parsed, "noah-bedroom", "Noah Bedroom")
-        assert out["found"] is True # nosec: B101 - assert used in test for correctness, not security
-        assert out["after"] == "Noah Bedroom" # nosec: B101 - assert used in test for correctness, not security
+        if not out["found"] is True: pytest.fail("Assertion failed")
+        if not out["after"] == "Noah Bedroom": pytest.fail("Assertion failed")
         n = next(n for n in parsed["nodes"] if n["name"] == "noah-bedroom")
-        assert n["room"] == "Noah Bedroom" # nosec: B101 - assert used in test for correctness, not security
+        if not n["room"] == "Noah Bedroom": pytest.fail("Assertion failed")
 
     def test_missing(self, parsed):
         out = rooms_core.repoint_node(parsed, "ghost-node", "Anywhere")
-        assert out["found"] is False # nosec: B101 - assert used in test for correctness, not security
+        if not out["found"] is False: pytest.fail("Assertion failed")
 
 
 # ── nodes module ────────────────────────────────────────────────────────────
@@ -194,27 +194,27 @@ class TestNodesCore:
     def test_list_config_nodes_strips_whitespace(self, parsed):
         rows = nodes_core.list_config_nodes(parsed)
         by_name = {r["name"]: r for r in rows}
-        assert by_name["noah-bedroom"]["room"] == "Sophie Bedroom" # nosec: B101 - assert used in test for correctness, not security
-        assert by_name["noah-bedroom"]["room_raw"] == "Sophie Bedroom " # nosec: B101 - assert used in test for correctness, not security
+        if not by_name["noah-bedroom"]["room"] == "Sophie Bedroom": pytest.fail("Assertion failed")
+        if not by_name["noah-bedroom"]["room_raw"] == "Sophie Bedroom ": pytest.fail("Assertion failed")
 
     def test_rename_in_config(self, parsed):
         out = nodes_core.rename_in_config(parsed, "spare-room", "noah-bedroom-new")
-        assert out["found"] is True # nosec: B101 - assert used in test for correctness, not security
+        if not out["found"] is True: pytest.fail("Assertion failed")
         names = [n["name"] for n in parsed["nodes"]]
-        assert "spare-room" not in names # nosec: B101 - assert used in test for correctness, not security
-        assert "noah-bedroom-new" in names # nosec: B101 - assert used in test for correctness, not security
+        if not "spare-room" not in names: pytest.fail("Assertion failed")
+        if not "noah-bedroom-new" in names: pytest.fail("Assertion failed")
 
     def test_set_point(self, parsed):
         out = nodes_core.set_point(parsed, "kitchen", [9.0, 8.0, 7.0])
-        assert out["found"] is True # nosec: B101 - assert used in test for correctness, not security
+        if not out["found"] is True: pytest.fail("Assertion failed")
         n = next(n for n in parsed["nodes"] if n["name"] == "kitchen")
-        assert list(n["point"]) == [9.0, 8.0, 7.0] # nosec: B101 - assert used in test for correctness, not security
+        if not list(n["point"]) == [9.0, 8.0, 7.0]: pytest.fail("Assertion failed")
 
     def test_remove(self, parsed):
-        assert nodes_core.remove(parsed, "kitchen") is True # nosec: B101 - assert used in test for correctness, not security
+        if not nodes_core.remove(parsed, "kitchen") is True: pytest.fail("Assertion failed")
         names = [n["name"] for n in parsed["nodes"]]
-        assert "kitchen" not in names # nosec: B101 - assert used in test for correctness, not security
-        assert nodes_core.remove(parsed, "ghost") is False # nosec: B101 - assert used in test for correctness, not security
+        if not "kitchen" not in names: pytest.fail("Assertion failed")
+        if not nodes_core.remove(parsed, "ghost") is False: pytest.fail("Assertion failed")
 
 
 # ── yaml_io round-trip ──────────────────────────────────────────────────────
@@ -225,8 +225,8 @@ class TestYamlIO:
         text = yaml_io.dumps(parsed)
         reparsed = yaml_io.load(text)
         # node count, room count, names all preserved
-        assert len(reparsed["nodes"]) == len(parsed["nodes"]) # nosec: B101 - assert used in test for correctness, not security
-        assert sum(len(f["rooms"]) for f in reparsed["floors"]) == 6 # nosec: B101 - assert used in test for correctness, not security
+        if not len(reparsed["nodes"]) == len(parsed["nodes"]): pytest.fail("Assertion failed")
+        if not sum(len(f["rooms"]) for f in reparsed["floors"]) == 6: pytest.fail("Assertion failed")
 
     def test_edit_then_round_trip(self):
         parsed = yaml_io.load(SAMPLE)
@@ -236,15 +236,15 @@ class TestYamlIO:
             "Sophie Bedroom": "Spare Room",
         })
         text = yaml_io.dumps(parsed)
-        assert "Noah Bedroom" in text # nosec: B101 - assert used in test for correctness, not security
-        assert "Sophie Bedroom" in text # nosec: B101 - assert used in test for correctness, not security
-        assert "Spare Room" in text # nosec: B101 - assert used in test for correctness, not security
+        if not "Noah Bedroom" in text: pytest.fail("Assertion failed")
+        if not "Sophie Bedroom" in text: pytest.fail("Assertion failed")
+        if not "Spare Room" in text: pytest.fail("Assertion failed")
         # round-trip stable
         reparsed = yaml_io.load(text)
         first_rooms = [r["name"] for r in reparsed["floors"][1]["rooms"]]
-        assert first_rooms[0] == "Noah Bedroom" # nosec: B101 - assert used in test for correctness, not security
-        assert first_rooms[1] == "Sophie Bedroom" # nosec: B101 - assert used in test for correctness, not security
-        assert first_rooms[2] == "Spare Room" # nosec: B101 - assert used in test for correctness, not security
+        if not first_rooms[0] == "Noah Bedroom": pytest.fail("Assertion failed")
+        if not first_rooms[1] == "Sophie Bedroom": pytest.fail("Assertion failed")
+        if not first_rooms[2] == "Spare Room": pytest.fail("Assertion failed")
 
 
 
