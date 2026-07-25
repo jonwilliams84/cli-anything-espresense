@@ -56,3 +56,57 @@ class TestB101Regression:
             pytest.fail(
                 f"Expected rotated room names {expected}, got {sorted(names)}"
             )
+
+    def test_regression_rotate_three_way_room_0_is_noah(self):
+        """Formerly test_core.py:145 — assert rooms[0].name == 'Noah Bedroom'.
+
+        Verifies that after the three-way rotation, the first room (originally
+        'Spare Room') has been renamed to 'Noah Bedroom'.
+        """
+        parsed = yaml_io.load(SAMPLE)
+        # Three-way rotation: Spare→Noah, Noah→Sophie, Sophie→Spare
+        rooms_core.rotate(parsed, {
+            "Spare Room": "Noah Bedroom",
+            "Noah Bedroom": "Sophie Bedroom",
+            "Sophie Bedroom": "Spare Room",
+        })
+        # B101 fix: was bare assert; replaced with pytest.fail() on line 145.
+        actual = parsed["floors"][1]["rooms"][0]["name"]
+        if actual != "Noah Bedroom":
+            pytest.fail(f"Expected rooms[0].name == 'Noah Bedroom', got {actual!r}")
+
+    def test_regression_rotate_three_way_room_1_is_sophie(self):
+        """Formerly test_core.py:146 — assert rooms[1].name == 'Sophie Bedroom'.
+
+        Verifies that after the three-way rotation, the second room (originally
+        'Noah Bedroom') has been renamed to 'Sophie Bedroom'.
+        """
+        parsed = yaml_io.load(SAMPLE)
+        # Three-way rotation: Spare→Noah, Noah→Sophie, Sophie→Spare
+        rooms_core.rotate(parsed, {
+            "Spare Room": "Noah Bedroom",
+            "Noah Bedroom": "Sophie Bedroom",
+            "Sophie Bedroom": "Spare Room",
+        })
+        # B101 fix: was bare assert; replaced with pytest.fail() on line 146.
+        actual = parsed["floors"][1]["rooms"][1]["name"]
+        if actual != "Sophie Bedroom":
+            pytest.fail(f"Expected rooms[1].name == 'Sophie Bedroom', got {actual!r}")
+
+    def test_regression_rotate_three_way_room_2_is_spare(self):
+        """Formerly test_core.py:147 — assert rooms[2].name == 'Spare Room'.
+
+        Verifies that after the three-way rotation, the third room (originally
+        'Sophie Bedroom') has been renamed back to 'Spare Room'.
+        """
+        parsed = yaml_io.load(SAMPLE)
+        # Three-way rotation: Spare→Noah, Noah→Sophie, Sophie→Spare
+        rooms_core.rotate(parsed, {
+            "Spare Room": "Noah Bedroom",
+            "Noah Bedroom": "Sophie Bedroom",
+            "Sophie Bedroom": "Spare Room",
+        })
+        # B101 fix: was bare assert; replaced with pytest.fail() on line 147.
+        actual = parsed["floors"][1]["rooms"][2]["name"]
+        if actual != "Spare Room":
+            pytest.fail(f"Expected rooms[2].name == 'Spare Room', got {actual!r}")
