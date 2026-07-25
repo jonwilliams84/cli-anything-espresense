@@ -11,7 +11,59 @@ import logging
 import pytest
 
 from cli_anything.espresense.core import project
+from cli_anything.espresense.core import rooms as rooms_core
 from cli_anything.espresense.core import stream
+from cli_anything.espresense.utils import yaml_io
+
+SAMPLE = """\
+floors:
+  - id: ground
+    name: Ground Floor
+    rooms:
+      - name: Kitchen
+        points: [[0,0],[1,0],[1,1],[0,1]]
+      - name: Hall
+        points: [[1,0],[2,0],[2,1],[1,1]]
+  - id: first
+    name: First Floor
+    rooms:
+      - name: Spare Room
+        points: [[0,0],[1,0],[1,1],[0,1]]
+      - name: Noah Bedroom
+        points: [[0,0],[1,0],[1,1],[0,1]]
+      - name: Sophie Bedroom
+        points: [[2,0],[3,0],[3,1],[2,1]]
+      - name: Master Bedroom
+        points: [[3,0],[4,0],[4,1],[3,1]]
+
+nodes:
+  - name: kitchen
+    point: [0.5, 0.5, 1.0]
+    floors: ["ground"]
+    room: Kitchen
+  - name: noah-bedroom
+    point: [0.5, 0.5, 1.0]
+    floors: ["first"]
+    room: "Sophie Bedroom "
+  - name: sophie-bedroom
+    point: [1.5, 0.5, 1.0]
+    floors: ["first"]
+    room: "Sophie Bedroom "
+  - name: spare-room
+    point: [2.5, 0.5, 1.0]
+    floors: ["first"]
+    room: "Spare Room "
+  - name: bedroom
+    point: [3.5, 0.5, 1.0]
+    floors: ["first"]
+    room: "Master Bedroom "
+"""
+
+
+@pytest.fixture
+def parsed():
+    return yaml_io.load(SAMPLE)
+
 
 
 # ---------------------------------------------------------------------------
@@ -115,3 +167,50 @@ def test_stream_ws_close_failure_does_not_raise(monkeypatch, caplog):
     assert len(collected) == 1
     # close error surfaced in debug log instead of silent pass
     assert any("ws.close() failed" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# B101 — assert_used in test_core.py must not be optimized away
+# ---------------------------------------------------------------------------
+
+def test_regression_rename_updates_kitchen_node_room_ref(parsed):
+    """Regression for former assert kitchen_node["room"] == "Cook Room".
+
+    The rename() function must update the node's room reference to match
+    the renamed room. Previously used bare assert; now uses pytest.fail().
+    """
+    from cli_anything.espresense.core import rooms as rooms_core
+    rooms_core.rename(parsed, "Kitchen", "Cook Room")
+    kitchen_node = next(n for n in parsed["nodes"] if n["name"] == "kitchen")
+    if kitchen_node["room"] != "Cook Room":
+        pytest.fail(f"Expected kitchen node room == 'Cook Room', got {kitchen_node['room']}")
+
+
+def test_regression_rename_strips_whitespace_and_reassigns_node(parsed):
+    """Regression for former assert noah["room"] == "Sophie Bedroom NEW".
+
+    The noah-bedroom node had room: "Sophie Bedroom " (trailing space).
+    After renaming Sophie Bedroom to "Sophie Bedroom NEW", the node's
+    room reference must be updated AND whitespace must be stripped.
+    Previously used bare assert; now uses pytest.fail().
+    """
+    from cli_anything.espresense.core import rooms as rooms_core
+    rooms_core.rename(parsed, "Sophie Bedroom", "Sophie Bedroom NEW")
+    noah = next(n for n in parsed["nodes"] if n["name"] == "noah-bedroom")
+    if noah["room"] != "Sophie Bedroom NEW":
+        pytest.fail(f"Expected noah node room == 'Sophie Bedroom NEW', got {noah['room']}")
+
+
+def test_regression_rename_strips_whitespace_without_renaming(parsed):
+    """Regression for former assert bedroom["room"] == "Master Bedroom".
+
+    The bedroom node had room: "Master Bedroom " (trailing space).
+    After renaming Sophie Bedroom (not Master Bedroom), the bedroom node's
+    room reference must still have whitespace stripped but NOT renamed.
+    Previously used bare assert; now uses pytest.fail().
+    """
+    from cli_anything.espresense.core import rooms as rooms_core
+    rooms_core.rename(parsed, "Sophie Bedroom", "Sophie Bedroom NEW")
+    bedroom = next(n for n in parsed["nodes"] if n["name"] == "bedroom")
+    if bedroom["room"] != "Master Bedroom":
+        pytest.fail(f"Expected bedroom node room == 'Master Bedroom', got {bedroom['room']}")
