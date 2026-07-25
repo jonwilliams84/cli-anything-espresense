@@ -33,8 +33,19 @@ def test_defaults_has_mqtt_password_key():
 # ---------------------------------------------------------------------------
 # B110 — stream callback errors must not crash the stream (now logged, not pass)
 # ---------------------------------------------------------------------------
+class _FakeTimeout(Exception):
+    """Stands in for websocket.WebSocketTimeoutException."""
+
+
 class _FakeWS:
-    """Minimal websocket stand-in: yields one event then closes."""
+    """Minimal websocket stand-in: yields the given events, then ends the stream.
+
+    Raising KeyboardInterrupt once the events are exhausted (stream() catches it)
+    makes the loop terminate on DATA rather than on the wall clock. Previously
+    recv() returned "" forever and the tests relied on a 1 ms duration expiring
+    before/after N events — pure scheduling luck: it passed on the build host and
+    failed in CI with `assert len(collected) == 2` getting 1.
+    """
 
     def __init__(self, events):
         self._events = list(events)
@@ -46,7 +57,7 @@ class _FakeWS:
     def recv(self):
         if self._events:
             return self._events.pop(0)
-        return ""  # empty -> stream loop continues / ends
+        raise KeyboardInterrupt  # deterministic end-of-stream
 
     def close(self):
         self.closed = True
@@ -62,13 +73,17 @@ def test_stream_callback_exception_does_not_crash(monkeypatch, caplog):
     ]
     fake = _FakeWS(events)
 
-    monkeypatch.setattr(stream, "websocket", type("W", (), {"create_connection": staticmethod(lambda *_a, **_k: fake)}))
+    monkeypatch.setattr(stream, "websocket", type("W", (), {"create_connection": staticmethod(lambda *_a, **_k: fake),
+                                    # stream() references this in an except clause; a stub
+                                    # without it raises AttributeError the moment recv()
+                                    # actually throws.
+                                    "WebSocketTimeoutException": _FakeTimeout}))
 
     def bad_callback(_event):
         raise RuntimeError("boom")
 
     with caplog.at_level(logging.WARNING, logger="cli_anything.espresense.core.stream"):
-        collected = stream.stream("http://x", duration=0.001, callback=bad_callback)
+        collected = stream.stream("http://x", duration=30, callback=bad_callback)
 
     # Both events collected despite callback raising on each
     assert len(collected) == 2
@@ -88,10 +103,14 @@ def test_stream_ws_close_failure_does_not_raise(monkeypatch, caplog):
 
     fake = CloseFailsWS(events)
 
-    monkeypatch.setattr(stream, "websocket", type("W", (), {"create_connection": staticmethod(lambda *_a, **_k: fake)}))
+    monkeypatch.setattr(stream, "websocket", type("W", (), {"create_connection": staticmethod(lambda *_a, **_k: fake),
+                                    # stream() references this in an except clause; a stub
+                                    # without it raises AttributeError the moment recv()
+                                    # actually throws.
+                                    "WebSocketTimeoutException": _FakeTimeout}))
 
     with caplog.at_level(logging.DEBUG, logger="cli_anything.espresense.core.stream"):
-        collected = stream.stream("http://x", duration=0.001)
+        collected = stream.stream("http://x", duration=30)
 
     assert len(collected) == 1
     # close error surfaced in debug log instead of silent pass
