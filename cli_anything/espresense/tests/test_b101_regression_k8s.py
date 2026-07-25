@@ -19,6 +19,14 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
+
+# Resolve the repo root from this file's own location rather than hardcoding a
+# path. The original version passed cwd="/work/repo" - the checkout path inside
+# the container that generated this test - so the subprocess could only ever
+# find the target test there, and the test failed with FileNotFoundError on
+# every GitHub runner (and any local checkout).
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class TestB101RegressionK8s:
@@ -42,7 +50,7 @@ class TestB101RegressionK8s:
             ],
             capture_output=True,
             text=True,
-            cwd="/work/repo",
+            cwd=str(REPO_ROOT),
         )
         # The if/raise pattern is NOT removed under -O, so it should pass.
         # If assert was still used, it would be removed and test would fail.
