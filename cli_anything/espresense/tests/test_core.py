@@ -142,9 +142,12 @@ class TestRotate:
         if sorted(names) != sorted(["Noah Bedroom", "Sophie Bedroom", "Spare Room", "Master Bedroom"]):
             pytest.fail("Expected rotated room names after three-way cycle")
         # Floor index 0 -> originally "Spare Room", now "Noah Bedroom"
-        assert parsed["floors"][1]["rooms"][0]["name"] == "Noah Bedroom"
-        assert parsed["floors"][1]["rooms"][1]["name"] == "Sophie Bedroom"
-        assert parsed["floors"][1]["rooms"][2]["name"] == "Spare Room"
+        if parsed["floors"][1]["rooms"][0]["name"] != "Noah Bedroom":
+            pytest.fail(f"Expected rooms[0].name == 'Noah Bedroom', got {parsed['floors'][1]['rooms'][0]['name']}")
+        if parsed["floors"][1]["rooms"][1]["name"] != "Sophie Bedroom":
+            pytest.fail(f"Expected rooms[1].name == 'Sophie Bedroom', got {parsed['floors'][1]['rooms'][1]['name']}")
+        if parsed["floors"][1]["rooms"][2]["name"] != "Spare Room":
+            pytest.fail(f"Expected rooms[2].name == 'Spare Room', got {parsed['floors'][1]['rooms'][2]['name']}")
         # Node room: references should follow the rotation too
         n_noah = next(n for n in parsed["nodes"] if n["name"] == "noah-bedroom")
         n_sophie = next(n for n in parsed["nodes"] if n["name"] == "sophie-bedroom")
