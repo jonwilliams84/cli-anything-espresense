@@ -110,3 +110,51 @@ class TestB101Regression:
         actual = parsed["floors"][1]["rooms"][2]["name"]
         if actual != "Spare Room":
             pytest.fail(f"Expected rooms[2].name == 'Spare Room', got {actual!r}")
+
+
+class TestB101RotateNodeRoomRegression:
+    """Regression suite for B101 assert_used fixes at test_core.py lines 157/159/161.
+
+    Each test reproduces the exact condition previously guarded by a bare
+    `assert`.  Replacing `assert` → `pytest.fail` preserves behaviour under
+    `python -O` (optimised bytecode removes bare asserts).
+    """
+
+    def test_regression_rotate_n_noah_room_is_spare(self):
+        """Formerly test_core.py:157 — assert n_noah['room'] == 'Spare Room'."""
+        parsed = yaml_io.load(SAMPLE)
+        rooms_core.rotate(parsed, {
+            "Spare Room": "Noah Bedroom",
+            "Noah Bedroom": "Sophie Bedroom",
+            "Sophie Bedroom": "Spare Room",
+        })
+        n_noah = next(n for n in parsed["nodes"] if n["name"] == "noah-bedroom")
+        # B101 fix: was bare assert; now pytest.fail so check survives -O
+        if n_noah["room"] != "Spare Room":
+            pytest.fail(f"Expected n_noah['room'] == 'Spare Room', got {n_noah['room']!r}")
+
+    def test_regression_rotate_n_sophie_room_is_noah(self):
+        """Formerly test_core.py:159 — assert n_sophie['room'] == 'Noah Bedroom'."""
+        parsed = yaml_io.load(SAMPLE)
+        rooms_core.rotate(parsed, {
+            "Spare Room": "Noah Bedroom",
+            "Noah Bedroom": "Sophie Bedroom",
+            "Sophie Bedroom": "Spare Room",
+        })
+        n_sophie = next(n for n in parsed["nodes"] if n["name"] == "sophie-bedroom")
+        # B101 fix: was bare assert; now pytest.fail so check survives -O
+        if n_sophie["room"] != "Noah Bedroom":
+            pytest.fail(f"Expected n_sophie['room'] == 'Noah Bedroom', got {n_sophie['room']!r}")
+
+    def test_regression_rotate_n_spare_room_is_sophie(self):
+        """Formerly test_core.py:161 — assert n_spare['room'] == 'Sophie Bedroom'."""
+        parsed = yaml_io.load(SAMPLE)
+        rooms_core.rotate(parsed, {
+            "Spare Room": "Noah Bedroom",
+            "Noah Bedroom": "Sophie Bedroom",
+            "Sophie Bedroom": "Spare Room",
+        })
+        n_spare = next(n for n in parsed["nodes"] if n["name"] == "spare-room")
+        # B101 fix: was bare assert; now pytest.fail so check survives -O
+        if n_spare["room"] != "Sophie Bedroom":
+            pytest.fail(f"Expected n_spare['room'] == 'Sophie Bedroom', got {n_spare['room']!r}")

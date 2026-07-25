@@ -154,11 +154,14 @@ class TestRotate:
         n_spare = next(n for n in parsed["nodes"] if n["name"] == "spare-room")
         # noah-bedroom's room was "Sophie Bedroom" (with trailing space, stripped),
         # which rotated -> "Spare Room"
-        assert n_noah["room"] == "Spare Room"
+        if n_noah["room"] != "Spare Room":
+            pytest.fail(f"Expected n_noah['room'] == 'Spare Room', got {n_noah["room"]}")
         # sophie-bedroom's room was "Spare Room" -> rotated to "Noah Bedroom"
-        assert n_sophie["room"] == "Noah Bedroom"
+        if n_sophie["room"] != "Noah Bedroom":
+            pytest.fail(f"Expected n_sophie['room'] == 'Noah Bedroom', got {n_sophie["room"]}")
         # spare-room's room was "Noah Bedroom" -> rotated to "Sophie Bedroom"
-        assert n_spare["room"] == "Sophie Bedroom"
+        if n_spare["room"] != "Sophie Bedroom":
+            pytest.fail(f"Expected n_spare['room'] == 'Sophie Bedroom', got {n_spare["room"]}")
         # Master Bedroom node should be untouched
         n_master = next(n for n in parsed["nodes"] if n["name"] == "bedroom")
         assert n_master["room"] == "Master Bedroom"
