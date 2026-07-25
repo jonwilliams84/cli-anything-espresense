@@ -29,3 +29,6 @@ Thumbs.db
 # Local connection profile — NEVER commit a token / broker creds
 .config/cli-anything-espresense.json
 ~/.config/cli-anything-espresense.json
+coverage.xml
+.coverage.*
+htmlcov/
