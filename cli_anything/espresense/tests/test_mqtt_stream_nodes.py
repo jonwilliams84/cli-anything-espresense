@@ -11,7 +11,7 @@ live-only autodiscovered nodes.
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -281,9 +281,11 @@ class TestMqttWatch:
 
     def test_watch_message_handler_decodes_payload(self):
         """The on_message handler must decode bytes payload to string."""
-        result, _ = self._run_watch_with_messages([
-            ("espresense/devices/abc", b'{"id":1}'),
-        ])
+        result, _ = self._run_watch_with_messages(
+            [
+                ("espresense/devices/abc", b'{"id":1}'),
+            ]
+        )
         assert len(result) == 1
         assert result[0]["topic"] == "espresense/devices/abc"
         assert result[0]["payload"] == '{"id":1}'
@@ -291,6 +293,7 @@ class TestMqttWatch:
 
     def test_watch_callback_failure_is_logged(self, caplog):
         """A raising callback must be logged, not silently swallowed."""
+
         def failing_callback(topic, payload):
             raise RuntimeError("callback boom")
 
@@ -324,11 +327,13 @@ class TestMqttWatch:
 
     def test_watch_collects_multiple_messages(self):
         """Multiple messages should all be collected in order."""
-        result, _ = self._run_watch_with_messages([
-            ("t/a", b"1"),
-            ("t/b", b"2"),
-            ("t/c", b"3"),
-        ])
+        result, _ = self._run_watch_with_messages(
+            [
+                ("t/a", b"1"),
+                ("t/b", b"2"),
+                ("t/c", b"3"),
+            ]
+        )
         assert len(result) == 3
         assert result[0]["payload"] == "1"
         assert result[2]["payload"] == "3"
