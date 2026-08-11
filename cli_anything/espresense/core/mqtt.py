@@ -183,3 +183,40 @@ def watch(
         c.loop_stop()
         c.disconnect()
     return collected
+
+
+def publish_device_config(
+    host: str,
+    device_id: str,
+    config: dict,
+    *,
+    port: int = 1883,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    prefix: str = "espresense",
+    retain: bool = True,
+) -> dict:
+    """Publish a per-device fingerprint config to `<prefix>/settings/<id>/config`.
+
+    This is the second half of the settings topic family documented at the top
+    of this module — `publish_setting` covers `rooms/<id>/<key>/set` (what a
+    NODE should do) and this covers `settings/<id>/config` (what the fleet
+    should believe about a tracked DEVICE: its name, its rssi@1m, its alias).
+
+    Retained by default, so nodes that are offline right now still pick the
+    config up when they reconnect.
+    """
+    if not device_id or "/" in device_id:
+        raise MqttError(f"device_id must be non-empty and contain no '/': {device_id!r}")
+    if not isinstance(config, dict):
+        raise MqttError(f"config must be a mapping, got {type(config).__name__}")
+    topic = f"{prefix}/settings/{device_id}/config"
+    return publish_raw(
+        host,
+        topic,
+        config,
+        port=port,
+        username=username,
+        password=password,
+        retain=retain,
+    )

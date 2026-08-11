@@ -810,7 +810,7 @@ class TestConfigYamlPushYaml:
 
         parsed = yaml_io.load("key: value\n")
         target = MagicMock()
-        with patch("cli_anything.espresense.core.config_yaml.k8s_backend") as mock_k8s:
+        with patch("cli_anything.espresense.core.config_source.k8s_backend") as mock_k8s:
             mock_k8s.write_config = MagicMock()
             mock_k8s.restart = MagicMock()
             summary = config_yaml.push_yaml(target, parsed, restart=False, backup=True)
@@ -827,7 +827,7 @@ class TestConfigYamlPushYaml:
 
         parsed = yaml_io.load("key: value\n")
         target = MagicMock()
-        with patch("cli_anything.espresense.core.config_yaml.k8s_backend") as mock_k8s:
+        with patch("cli_anything.espresense.core.config_source.k8s_backend") as mock_k8s:
             mock_k8s.write_config = MagicMock()
             mock_k8s.restart = MagicMock()
             summary = config_yaml.push_yaml(target, parsed, restart=True, backup=False)
@@ -839,7 +839,7 @@ class TestConfigYamlPushYaml:
 
     def test_fetch_yaml_returns_raw_and_parsed(self):
         target = MagicMock()
-        with patch("cli_anything.espresense.core.config_yaml.k8s_backend") as mock_k8s:
+        with patch("cli_anything.espresense.core.config_source.k8s_backend") as mock_k8s:
             mock_k8s.read_config = MagicMock(return_value="key: value\n")
             raw, parsed = config_yaml.fetch_yaml(target)
             if raw != "key: value\n":

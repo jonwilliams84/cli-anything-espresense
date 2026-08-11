@@ -510,11 +510,12 @@ class TestCliNodesList:
         cfg_path = tmp_path / "cfg.json"
         cfg_path.write_text("{}")
         monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg_path)
+        mock_source = MagicMock()
+        mock_source.fetch.return_value = ("raw", {"nodes": []})
         with (
-            patch("cli_anything.espresense.espresense_cli.config_core") as mock_cfg,
+            patch.object(cli_mod, "make_config_source", return_value=mock_source),
             patch("cli_anything.espresense.espresense_cli.nodes_core") as mock_nodes,
         ):
-            mock_cfg.fetch_yaml.return_value = ("raw", {"nodes": []})
             mock_nodes.list_config_nodes.return_value = [{"name": "n1"}]
             runner = CliRunner()
             result = runner.invoke(
@@ -531,12 +532,13 @@ class TestCliNodesList:
         from cli_anything.espresense.utils.companion_client import CompanionError
 
         mock_client = MagicMock()
+        mock_source = MagicMock()
+        mock_source.fetch.return_value = ("raw", {"nodes": []})
         with (
-            patch("cli_anything.espresense.espresense_cli.config_core") as mock_cfg,
+            patch.object(cli_mod, "make_config_source", return_value=mock_source),
             patch("cli_anything.espresense.espresense_cli.nodes_core") as mock_nodes,
             patch.object(cli_mod, "make_client", return_value=mock_client),
         ):
-            mock_cfg.fetch_yaml.return_value = ("raw", {"nodes": []})
             mock_nodes.list_live_nodes.side_effect = CompanionError("unreachable")
             mock_nodes.list_config_nodes.return_value = [{"name": "fallback"}]
             runner = CliRunner()

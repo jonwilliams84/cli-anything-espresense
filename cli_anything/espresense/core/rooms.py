@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from cli_anything.espresense.utils import yaml_io
+
 
 def list_rooms(parsed: Any, floor_id: Optional[str] = None) -> list[dict]:
     """Return [{floor_id, floor_name, room_name, point_count, has_color, node_count}]."""
@@ -135,3 +137,77 @@ def repoint_node(parsed: Any, node_name: str, room_name: str) -> dict:
             node["room"] = room_name
             return {"found": True, "before": before, "after": room_name}
     return {"found": False, "before": None, "after": None}
+
+
+def add_room(
+    parsed: Any,
+    floor_id: str,
+    name: str,
+    points: list,
+    *,
+    color: Optional[str] = None,
+) -> dict:
+    """Append a new room polygon to a floor.
+
+    Refuses to create a duplicate name, because a duplicate makes every node
+    `room:` reference to that name ambiguous (see validate.DUPLICATE_ROOM_NAME).
+    Returns {added, floor_id, room_name, point_count}.
+    """
+    if not name or not str(name).strip():
+        raise ValueError("room name must be non-empty")
+    name = str(name).strip()
+    for fl in parsed.get("floors") or []:
+        for room in fl.get("rooms") or []:
+            if room.get("name") == name:
+                raise ValueError(
+                    f"room {name!r} already exists on floor {fl.get('id')!r}; "
+                    "room names must be unique across all floors"
+                )
+    target = None
+    for fl in parsed.get("floors") or []:
+        if fl.get("id") == floor_id:
+            target = fl
+            break
+    if target is None:
+        raise KeyError(f"no floor with id={floor_id!r}")
+    if target.get("rooms") is None:
+        target["rooms"] = []
+    room: dict = {
+        "name": name,
+        "points": yaml_io.flow_seq([yaml_io.flow_seq(list(pt)) for pt in points]),
+    }
+    if color is not None:
+        room["color"] = color
+    target["rooms"].append(room)
+    return {
+        "added": True,
+        "floor_id": floor_id,
+        "room_name": name,
+        "point_count": len(room["points"]),
+    }
+
+
+def delete_room(parsed: Any, name: str) -> dict:
+    """Remove a room polygon. Reports which nodes are left dangling.
+
+    The nodes are deliberately NOT rewritten: silently blanking a node's
+    `room:` would hide the consequence of the delete. The returned
+    `orphaned_nodes` list tells the caller exactly what to repoint, and
+    `config doctor` will flag them as dangling_room_ref until they are.
+    """
+    removed = 0
+    floor_id = None
+    for fl in parsed.get("floors") or []:
+        rooms_list = fl.get("rooms") or []
+        for i in range(len(rooms_list) - 1, -1, -1):
+            if rooms_list[i].get("name") == name:
+                del rooms_list[i]
+                removed += 1
+                floor_id = fl.get("id")
+    orphaned = [n.get("name") for n in _nodes_assigned_to(parsed, name)]
+    return {
+        "deleted": removed > 0,
+        "rooms_removed": removed,
+        "floor_id": floor_id,
+        "orphaned_nodes": orphaned,
+    }

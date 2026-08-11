@@ -10,6 +10,7 @@ import click
 
 from cli_anything.espresense.core import (
     calibration as calibration_core,
+    config_source as config_source_core,
     config_yaml as config_core,
     devices as devices_core,
     history as history_core,
@@ -20,6 +21,7 @@ from cli_anything.espresense.core import (
     project,
     rooms as rooms_core,
     stream as stream_core,
+    validate as validate_core,
 )
 from cli_anything.espresense.core import companion_api
 from cli_anything.espresense.utils.companion_client import CompanionClient, CompanionError
@@ -47,6 +49,27 @@ def make_k8s_target(ctx: click.Context) -> k8s_backend.K8sTarget:
         container=obj["k8s_container"],
         config_path=obj["k8s_config_path"],
     )
+
+
+def make_config_source(ctx: click.Context, file: str | None = None):
+    """Resolve where config.yaml is read from / written to.
+
+    `--file` selects a local YAML; otherwise the running pod via kubectl.
+    Keeping this in one place means every structured edit (rooms, nodes)
+    gained offline operation at once, with no per-command branching.
+    """
+    return config_source_core.from_options(make_k8s_target(ctx), file)
+
+
+def config_file_option(fn):
+    """Shared `--file` option for every command that edits config.yaml."""
+    return click.option(
+        "--file",
+        "config_file",
+        default=None,
+        type=click.Path(dir_okay=False),
+        help="Operate on a local YAML file instead of the pod (no kubectl needed).",
+    )(fn)
 
 
 def emit(ctx: click.Context, data) -> None:
@@ -186,7 +209,7 @@ def cli(
 
 @cli.group()
 def config():
-    """Manage the local connection profile (~/.config/cli-anything-espresense.json)."""
+    """Local connection profile, plus validation of the espresense config.yaml."""
 
 
 @config.command("show")
@@ -204,6 +227,48 @@ def config_save(ctx):
     safe = {k: v for k, v in ctx.obj.items() if k not in ("config_path", "as_json")}
     out = project.save_config(safe, ctx.obj.get("config_path"))
     emit(ctx, {"saved": str(out)})
+
+
+@config.command("doctor")
+@click.option("--strict", is_flag=True, help="Treat warnings as failures too")
+@config_file_option
+@click.pass_context
+def config_doctor(ctx, strict, config_file):
+    """Check config.yaml for the drift that breaks room tracking.
+
+    Detects dangling node `room:` references, whitespace-padded room names,
+    duplicate room/node/floor ids, malformed `point:` values and degenerate
+    polygons. Read-only — it never writes or restarts anything.
+
+    Exits 1 if any error is found (or any warning, with --strict), so it can
+    gate a push:
+
+      cli-anything-espresense config doctor --file cfg.yaml && \
+        cli-anything-espresense companion config-push cfg.yaml --restart
+    """
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    report = validate_core.check(parsed)
+    report["source"] = source.describe()
+
+    if ctx.obj.get("as_json"):
+        emit(ctx, report)
+    else:
+        counts = report["counts"]
+        click.echo(
+            f"checked {counts['floors']} floor(s), {counts['rooms']} room(s), "
+            f"{counts['nodes']} node(s)"
+        )
+        for finding in report["errors"] + report["warnings"]:
+            marker = "ERROR" if finding["level"] == "error" else "warn "
+            click.echo(f"  {marker} [{finding['code']}] {finding['message']}")
+        if report["ok"] and not report["warnings"]:
+            click.echo("config is clean")
+        else:
+            click.echo(f"{counts['errors']} error(s), {counts['warnings']} warning(s)")
+
+    if report["errors"] or (strict and report["warnings"]):
+        sys.exit(1)
 
 
 # ──────────────────────────────────────────────────────── companion
@@ -348,6 +413,84 @@ def companion_stream(ctx, duration, types, show_all):
     emit(ctx, events)
 
 
+@companion.command("locator")
+@click.pass_context
+def companion_locator(ctx):
+    """Show the locator/solver state (/api/state/locator)."""
+    client = make_client(ctx)
+    emit(ctx, companion_api.get_locator_state(client))
+
+
+@companion.command("firmware-types")
+@click.pass_context
+def companion_firmware_types(ctx):
+    """List the firmware flavors/versions the companion can flash to a node.
+
+    Pair with `nodes update-firmware <id> <url>` to pick a valid target.
+    """
+    client = make_client(ctx)
+    emit(ctx, companion_api.list_firmware_types(client))
+
+
+@companion.command("pod")
+@click.pass_context
+def companion_pod(ctx):
+    """Resolve the companion's running pod name via kubectl.
+
+    Useful for confirming the kubectl target is right before a config-push,
+    and for hand-running `kubectl logs` against the same pod.
+    """
+    target = make_k8s_target(ctx)
+    name = k8s_backend.pod_name(target)
+    emit(
+        ctx,
+        {
+            "namespace": target.namespace,
+            "deployment": target.deployment,
+            "pod": name or None,
+            "resolved": bool(name),
+        },
+    )
+
+
+# ──────────────────────────────────────────────────────── floors
+
+
+@cli.group()
+def floors():
+    """Inspect the floors declared in config.yaml."""
+
+
+@floors.command("list")
+@config_file_option
+@click.pass_context
+def floors_list(ctx, config_file):
+    """List every floor with its room and node counts."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    emit(ctx, config_core.list_floors(parsed))
+
+
+@floors.command("show")
+@click.argument("floor_id", required=False)
+@config_file_option
+@click.pass_context
+def floors_show(ctx, floor_id, config_file):
+    """Show one floor in full (defaults to the first floor)."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        floor = (
+            config_core.find_floor(parsed, floor_id)
+            if floor_id
+            else config_core.first_floor(parsed)
+        )
+    except KeyError as exc:
+        _abort(str(exc))
+        return
+    emit(ctx, json.loads(json.dumps(floor, default=str)))
+
+
 # ──────────────────────────────────────────────────────── rooms
 
 
@@ -358,11 +501,12 @@ def rooms():
 
 @rooms.command("list")
 @click.option("--floor", default=None, help="Restrict to this floor id")
+@config_file_option
 @click.pass_context
-def rooms_list(ctx, floor):
+def rooms_list(ctx, floor, config_file):
     """List rooms across all floors (or one floor)."""
-    target = make_k8s_target(ctx)
-    _, parsed = config_core.fetch_yaml(target)
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
     rows = rooms_core.list_rooms(parsed, floor_id=floor)
     emit(ctx, rows)
 
@@ -376,15 +520,16 @@ def rooms_list(ctx, floor):
     help="Restart the companion afterwards (default: no — review first)",
 )
 @click.option("--dry-run", is_flag=True, help="Show the proposed edits without writing")
+@config_file_option
 @click.pass_context
-def rooms_rename(ctx, old, new, restart, dry_run):
+def rooms_rename(ctx, old, new, restart, dry_run, config_file):
     """Rename ONE room polygon AND all nodes that referenced it.
 
     Also strips trailing-whitespace bugs on every node's `room:` field as a
     side effect, since those are a common cause of "doesn't match polygon" sync issues.
     """
-    target = make_k8s_target(ctx)
-    _, parsed = config_core.fetch_yaml(target)
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
     summary = rooms_core.rename(parsed, old, new)
     summary["dry_run"] = dry_run
     if not dry_run and (
@@ -392,7 +537,7 @@ def rooms_rename(ctx, old, new, restart, dry_run):
         or summary["nodes_repointed"] > 0
         or summary["whitespace_fixes"] > 0
     ):
-        push = config_core.push_yaml(target, parsed, restart=restart)
+        push = source.push(parsed, restart=restart)
         summary["pushed"] = push
     emit(ctx, summary)
 
@@ -409,8 +554,9 @@ def rooms_rename(ctx, old, new, restart, dry_run):
     "--restart/--no-restart", default=False, help="Restart the companion afterwards (default: no)"
 )
 @click.option("--dry-run", is_flag=True, help="Show the proposed edits without writing")
+@config_file_option
 @click.pass_context
-def rooms_rotate(ctx, mappings, restart, dry_run):
+def rooms_rotate(ctx, mappings, restart, dry_run, config_file):
     """Apply N room renames atomically. Use for swaps and rotations.
 
     Examples:
@@ -428,12 +574,12 @@ def rooms_rotate(ctx, mappings, restart, dry_run):
         if not old or not new:
             _abort(f"--map empty side in {entry!r}")
         parsed_map[old] = new
-    target = make_k8s_target(ctx)
-    _, parsed = config_core.fetch_yaml(target)
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
     summary = rooms_core.rotate(parsed, parsed_map)
     summary["dry_run"] = dry_run
     if not dry_run:
-        push = config_core.push_yaml(target, parsed, restart=restart)
+        push = source.push(parsed, restart=restart)
         summary["pushed"] = push
     emit(ctx, summary)
 
@@ -443,16 +589,91 @@ def rooms_rotate(ctx, mappings, restart, dry_run):
 @click.argument("room_name")
 @click.option("--restart/--no-restart", default=False)
 @click.option("--dry-run", is_flag=True)
+@config_file_option
 @click.pass_context
-def rooms_repoint(ctx, node_name, room_name, restart, dry_run):
+def rooms_repoint(ctx, node_name, room_name, restart, dry_run, config_file):
     """Set a single node's `room:` to a specific room (without renaming anything)."""
-    target = make_k8s_target(ctx)
-    _, parsed = config_core.fetch_yaml(target)
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
     out = rooms_core.repoint_node(parsed, node_name, room_name)
     out["dry_run"] = dry_run
     if not dry_run and out["found"]:
-        push = config_core.push_yaml(target, parsed, restart=restart)
+        push = source.push(parsed, restart=restart)
         out["pushed"] = push
+    emit(ctx, out)
+
+
+@rooms.command("add")
+@click.argument("floor_id")
+@click.argument("name")
+@click.option(
+    "--point",
+    "points",
+    multiple=True,
+    required=True,
+    help="Polygon vertex as x,y (repeatable, min 3 for a real room).",
+)
+@click.option("--color", default=None, help="Room colour, e.g. '#a3c9f9'")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def rooms_add(ctx, floor_id, name, points, color, restart, dry_run, config_file):
+    """Add a new room polygon to a floor.
+
+    Example:
+      rooms add gf "Office" --point 0,0 --point 4,0 --point 4,3 --point 0,3
+    """
+    parsed_points: list[list[float]] = []
+    for entry in points:
+        parts = entry.replace(" ", "").split(",")
+        if len(parts) != 2:
+            _abort(f"--point expected x,y, got {entry!r}")
+        try:
+            parsed_points.append([float(parts[0]), float(parts[1])])
+        except ValueError:
+            _abort(f"--point coordinates must be numbers, got {entry!r}")
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = rooms_core.add_room(parsed, floor_id, name, parsed_points, color=color)
+    except (ValueError, KeyError) as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@rooms.command("delete")
+@click.argument("name")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@click.option("--force", is_flag=True, help="Delete even if nodes still reference the room")
+@config_file_option
+@click.pass_context
+def rooms_delete(ctx, name, restart, dry_run, force, config_file):
+    """Delete a room polygon.
+
+    Nodes still pointing at it are reported as `orphaned_nodes` and are NOT
+    rewritten — repoint them with `rooms repoint-node`. Refuses to write if
+    any node would be orphaned unless --force is given.
+    """
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    out = rooms_core.delete_room(parsed, name)
+    out["dry_run"] = dry_run
+    if out["orphaned_nodes"] and not force:
+        out["pushed"] = None
+        out["refused"] = (
+            f"{len(out['orphaned_nodes'])} node(s) still reference {name!r}; "
+            "repoint them first or pass --force"
+        )
+        emit(ctx, out)
+        sys.exit(1)
+    if not dry_run and out["deleted"]:
+        out["pushed"] = source.push(parsed, restart=restart)
     emit(ctx, out)
 
 
@@ -475,11 +696,12 @@ def nodes():
     default=True,
     help="Include telemetry when calling the live API (default: yes)",
 )
+@config_file_option
 @click.pass_context
-def nodes_list(ctx, merge_live, include_telemetry):
+def nodes_list(ctx, merge_live, include_telemetry, config_file):
     """List nodes — by default merges config.yaml with live API state."""
-    target = make_k8s_target(ctx)
-    _, parsed = config_core.fetch_yaml(target)
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
     if not merge_live:
         emit(ctx, nodes_core.list_config_nodes(parsed))
         return
@@ -507,15 +729,16 @@ def nodes_show(ctx, node_id):
 @click.argument("new")
 @click.option("--restart/--no-restart", default=False)
 @click.option("--dry-run", is_flag=True)
+@config_file_option
 @click.pass_context
-def nodes_rename_in_config(ctx, old, new, restart, dry_run):
+def nodes_rename_in_config(ctx, old, new, restart, dry_run, config_file):
     """Rename a node's `name:` in config.yaml only (does NOT touch the physical device)."""
-    target = make_k8s_target(ctx)
-    _, parsed = config_core.fetch_yaml(target)
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
     out = nodes_core.rename_in_config(parsed, old, new)
     out["dry_run"] = dry_run
     if not dry_run and out["found"]:
-        push = config_core.push_yaml(target, parsed, restart=restart)
+        push = source.push(parsed, restart=restart)
         out["pushed"] = push
     emit(ctx, out)
 
@@ -527,15 +750,16 @@ def nodes_rename_in_config(ctx, old, new, restart, dry_run):
 @click.argument("z", type=float)
 @click.option("--restart/--no-restart", default=False)
 @click.option("--dry-run", is_flag=True)
+@config_file_option
 @click.pass_context
-def nodes_set_point(ctx, name, x, y, z, restart, dry_run):
+def nodes_set_point(ctx, name, x, y, z, restart, dry_run, config_file):
     """Set a node's 3D point in config.yaml."""
-    target = make_k8s_target(ctx)
-    _, parsed = config_core.fetch_yaml(target)
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
     out = nodes_core.set_point(parsed, name, [x, y, z])
     out["dry_run"] = dry_run
     if not dry_run and out["found"]:
-        push = config_core.push_yaml(target, parsed, restart=restart)
+        push = source.push(parsed, restart=restart)
         out["pushed"] = push
     emit(ctx, out)
 
@@ -586,6 +810,75 @@ def nodes_put_settings(ctx, node_id, settings_json):
     client = make_client(ctx)
     companion_api.put_node(client, node_id, payload)
     emit(ctx, {"node_id": node_id, "updated": True})
+
+
+@nodes.command("add")
+@click.argument("name")
+@click.option("--room", default=None, help="Room name this node sits in")
+@click.option("--point", default=None, help="Position as x,y,z")
+@click.option("--floor", "floors_opt", multiple=True, help="Floor id (repeatable)")
+@click.option("--disabled", is_flag=True, help="Add with enabled: false")
+@click.option("--mobile", is_flag=True, help="Add with stationary: false")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def nodes_add(ctx, name, room, point, floors_opt, disabled, mobile, restart, dry_run, config_file):
+    """Add a new node entry to config.yaml.
+
+    Example:
+      nodes add office-node --room "Office" --point 1.2,3.4,2.1
+    """
+    parsed_point = None
+    if point:
+        parts = point.replace(" ", "").split(",")
+        if len(parts) != 3:
+            _abort(f"--point expected x,y,z, got {point!r}")
+        try:
+            parsed_point = [float(v) for v in parts]
+        except ValueError:
+            _abort(f"--point coordinates must be numbers, got {point!r}")
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = nodes_core.add(
+            parsed,
+            name,
+            room=room,
+            point=parsed_point,
+            floors=list(floors_opt) or None,
+            enabled=not disabled,
+            stationary=not mobile,
+        )
+    except ValueError as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@nodes.command("remove-from-config")
+@click.argument("name")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def nodes_remove_from_config(ctx, name, restart, dry_run, config_file):
+    """Remove a node entry from config.yaml.
+
+    The counterpart to `nodes delete`, which only clears the companion's
+    runtime settings/telemetry and leaves config.yaml untouched. Use both to
+    fully retire a node.
+    """
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    removed = nodes_core.remove(parsed, name)
+    out = {"name": name, "removed": removed, "dry_run": dry_run}
+    if not dry_run and removed:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
 
 
 # ──────────────────────────────────────────────────────── node (direct HTTP to one ESP)
@@ -688,6 +981,54 @@ def node_devices(ctx, host):
     """Devices currently seen by this node."""
     info = _node_client(ctx, host).info(show_all=True)
     emit(ctx, info.get("devices") or [])
+
+
+@node.command("reboot")
+@click.argument("host")
+@click.pass_context
+def node_reboot(ctx, host):
+    """POST /reboot on the node (firmware alias of /restart)."""
+    ok = _node_client(ctx, host).reboot()
+    emit(ctx, {"host": host, "rebooted": ok})
+
+
+@node.command("config-list")
+@click.argument("host")
+@click.pass_context
+def node_config_list(ctx, host):
+    """List the per-device config entries stored on this node."""
+    emit(ctx, _node_client(ctx, host).list_device_configs())
+
+
+@node.command("config-set")
+@click.argument("host")
+@click.argument("device_id")
+@click.option("--alias", default=None, help="Short alias the node reports instead of the raw id")
+@click.option("--name", default=None, help="Friendly device name")
+@click.option("--rssi-at-1m", default=None, type=int, help="Calibrated rssi@1m for this device")
+@click.pass_context
+def node_config_set(ctx, host, device_id, alias, name, rssi_at_1m):
+    """Add or update one device-config entry on this node (POST /json/configs).
+
+    Example:
+      node config-set 10.32.101.32 apple:1005:9-12 --name "Jon Watch" --rssi-at-1m -59
+    """
+    if alias is None and name is None and rssi_at_1m is None:
+        _abort("nothing to set — pass at least one of --alias / --name / --rssi-at-1m")
+    res = _node_client(ctx, host).upsert_device_config(
+        device_id, alias=alias, name=name, rssi_at_1m=rssi_at_1m
+    )
+    emit(ctx, {"host": host, "device_id": device_id, "result": res})
+
+
+@node.command("config-delete")
+@click.argument("host")
+@click.argument("device_id")
+@click.pass_context
+def node_config_delete(ctx, host, device_id):
+    """Delete one device-config entry from this node (DELETE /json/configs)."""
+    ok = _node_client(ctx, host).delete_device_config(device_id)
+    emit(ctx, {"host": host, "device_id": device_id, "deleted": ok})
 
 
 # ──────────────────────────────────────────────────────── devices (companion view)
@@ -864,6 +1205,43 @@ def mqtt_pub(ctx, topic, payload, retain):
     """Publish a raw topic/payload (use to set arbitrary settings)."""
     kw = _mqtt_args(ctx)
     out = mqtt_core.publish_raw(topic=topic, payload=payload, retain=retain, **kw)
+    emit(ctx, out)
+
+
+@mqtt.command("set-device")
+@click.argument("device_id")
+@click.argument("config_json")
+@click.option(
+    "--retain/--no-retain", default=True, help="Retain the message on the broker (default: yes)"
+)
+@click.option("--prefix", default=None, help="Topic prefix (default: espresense)")
+@click.pass_context
+def mqtt_set_device(ctx, device_id, config_json, retain, prefix):
+    """Publish a tracked-device fingerprint: espresense/settings/<id>/config
+
+    The device-side counterpart to `mqtt set-node`. Retained by default so
+    nodes that are offline right now still pick it up on reconnect.
+
+    Example:
+      mqtt set-device apple:1005:9-12 '{"name":"Jon Watch","rssi@1m":-59}'
+    """
+    try:
+        payload = json.loads(config_json)
+    except json.JSONDecodeError as e:
+        _abort(f"config_json is not valid JSON: {e}")
+        return
+    kw = _mqtt_args(ctx)
+    try:
+        out = mqtt_core.publish_device_config(
+            device_id=device_id,
+            config=payload,
+            prefix=prefix or ctx.obj.get("mqtt_topic_prefix", "espresense"),
+            retain=retain,
+            **kw,
+        )
+    except mqtt_core.MqttError as exc:
+        _abort(str(exc))
+        return
     emit(ctx, out)
 
 
