@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from cli_anything.espresense.core import companion_api
+from cli_anything.espresense.utils import yaml_io
 from cli_anything.espresense.utils.companion_client import CompanionClient
 
 
@@ -115,7 +116,7 @@ def set_point(parsed: Any, name: str, point: list) -> dict:
     for node in parsed.get("nodes") or []:
         if node.get("name") == name:
             before = list(node.get("point") or [])
-            node["point"] = list(point)
+            node["point"] = yaml_io.flow_seq(list(point))
             return {"found": True, "before": before, "after": list(point)}
     return {"found": False, "before": None, "after": None}
 
@@ -128,3 +129,47 @@ def remove(parsed: Any, name: str) -> bool:
             del nodes[i]
             return True
     return False
+
+
+def add(
+    parsed: Any,
+    name: str,
+    *,
+    room: str | None = None,
+    point: list | None = None,
+    floors: list | None = None,
+    enabled: bool = True,
+    stationary: bool = True,
+) -> dict:
+    """Append a new node to config.yaml.
+
+    Refuses duplicates by name — the companion keys nodes by name, so a
+    second entry with the same name silently shadows the first.
+    Returns {added, name, room, point}.
+    """
+    if not name or not str(name).strip():
+        raise ValueError("node name must be non-empty")
+    name = str(name).strip()
+    if parsed.get("nodes") is None:
+        parsed["nodes"] = []
+    for node in parsed["nodes"]:
+        if node.get("name") == name:
+            raise ValueError(f"node {name!r} already exists in config.yaml")
+    entry: dict = {"name": name}
+    if room is not None:
+        entry["room"] = str(room).strip()
+    if point is not None:
+        entry["point"] = yaml_io.flow_seq(list(point))
+    if floors is not None:
+        entry["floors"] = list(floors)
+    if not enabled:
+        entry["enabled"] = False
+    if not stationary:
+        entry["stationary"] = False
+    parsed["nodes"].append(entry)
+    return {
+        "added": True,
+        "name": name,
+        "room": entry.get("room"),
+        "point": entry.get("point"),
+    }

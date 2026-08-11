@@ -10,6 +10,7 @@ import io
 from typing import Any
 
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedSeq
 
 
 def _yaml() -> YAML:
@@ -38,3 +39,19 @@ def dumps(data: Any) -> str:
 def dump_path(data: Any, path: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         _yaml().dump(data, f)
+
+
+def flow_seq(items: Any) -> CommentedSeq:
+    """A sequence that dumps inline (`[1, 2, 3]`) rather than as a block.
+
+    ESPresense configs are hand-authored with coordinates written compactly —
+    `point: [1.0, 2.0, 2.5]`, `points: [[0, 0], [4, 0]]`. ruamel only preserves
+    that style for nodes it *parsed*; anything the harness constructs from
+    scratch defaults to block style, so an added room would render as a
+    20-line ladder of `- - 5.0` next to its inline neighbours. Building new
+    coordinate sequences through this helper keeps added entries visually
+    consistent with the file they are being appended to.
+    """
+    seq = CommentedSeq(items)
+    seq.fa.set_flow_style()
+    return seq

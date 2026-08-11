@@ -1,6 +1,6 @@
 ---
 name: cli-anything-espresense
-description: CLI harness for the ESPresense ecosystem — read/edit the companion's YAML config, rotate or rename rooms, manage nodes, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry.
+description: CLI harness for the ESPresense ecosystem — read/edit/validate the companion's YAML config, rotate or rename rooms, add rooms and nodes, manage nodes, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry.
 ---
 
 # cli-anything-espresense
@@ -12,8 +12,11 @@ per-node ESP32 web UI, and direct MQTT — behind a single Click CLI with full
 
 ## When to use
 
-- Auditing or editing the companion's `config.yaml` (rooms, polygons, nodes,
-  devices, calibration, optimization).
+- Auditing, validating or editing the companion's `config.yaml` (rooms,
+  polygons, nodes, devices, calibration, optimization) — against the live pod
+  or a local file with `--file`.
+- Diagnosing "the node is in the wrong room" / "device isn't being located"
+  with `config doctor`, which names the exact broken reference.
 - Renaming or rotating room labels — and fixing every node `room:`
   reference in the same operation.
 - Inspecting one ESP node's status, settings, or seen-devices list by IP.
@@ -41,15 +44,16 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 
 | Group | Examples |
 |---|---|
-| `companion` | `companion info`, `companion config-get`, `companion config-fetch -o cfg.yaml`, `companion config-push cfg.yaml --restart`, `companion restart`, `companion stream --duration 30 --type deviceChanged` |
-| `rooms` | `rooms list`, `rooms rename "Spare" "Office" --restart`, `rooms rotate --map "A=B" --map "B=A" --restart`, `rooms repoint-node noah-bedroom "Noah Bedroom"` |
-| `nodes` | `nodes list`, `nodes show <id>`, `nodes rename-in-config <old> <new>`, `nodes set-point <name> X Y Z`, `nodes restart <id>`, `nodes delete <id>`, `nodes update-firmware <id> <url>`, `nodes put-settings <id> '{"calibration":{"absorption":2.8}}'` |
-| `node` | `node info <ip>`, `node restart <ip>`, `node settings <ip> --section extras`, `node set <ip> absorption=2.8`, `node rename <ip> <new-name>`, `node devices <ip>` |
+| `companion` | `companion info`, `companion config-get`, `companion config-fetch -o cfg.yaml`, `companion config-push cfg.yaml --restart`, `companion restart`, `companion stream --duration 30 --type deviceChanged`, `companion locator`, `companion firmware-types`, `companion pod` |
+| `rooms` | `rooms list`, `rooms add gf "Study" --point 5,0 --point 9,0 --point 9,4`, `rooms delete "Study"`, `rooms rename "Spare" "Office" --restart`, `rooms rotate --map "A=B" --map "B=A" --restart`, `rooms repoint-node noah-bedroom "Noah Bedroom"` |
+| `floors` | `floors list`, `floors show gf` |
+| `nodes` | `nodes list`, `nodes show <id>`, `nodes add <name> --room "Office" --point 1,2,3`, `nodes remove-from-config <name>`, `nodes rename-in-config <old> <new>`, `nodes set-point <name> X Y Z`, `nodes restart <id>`, `nodes delete <id>`, `nodes update-firmware <id> <url>`, `nodes put-settings <id> '{"calibration":{"absorption":2.8}}'` |
+| `node` | `node info <ip>`, `node restart <ip>`, `node reboot <ip>`, `node settings <ip> --section extras`, `node set <ip> absorption=2.8`, `node rename <ip> <new-name>`, `node devices <ip>`, `node config-list <ip>`, `node config-set <ip> <device-id> --name X --rssi-at-1m -59`, `node config-delete <ip> <device-id>` |
 | `devices` | `devices list`, `devices show <id>`, `devices set <id> --name "Jon Phone" --ref-rssi -59` |
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on` |
 | `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50` |
-| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10` |
-| `config` | `config show`, `config save` |
+| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10` |
+| `config` | `config show`, `config save`, `config doctor --file cfg.yaml` |
 | `repl` | Interactive shell (default with no subcommand) |
 
 ## Agent guidance
@@ -89,9 +93,55 @@ are retained by default — the node applies the new value on next message
 processing. The companion will also pick up the value into its
 `NodeSettings` state.
 
-**Config writes** require `kubectl` to be available and the user to have
-exec permission on the companion's deployment. Each write leaves a
+**Config writes** against the live pod require `kubectl` and exec permission
+on the companion's deployment. Each write leaves a
 `config.yaml.<unix-ts>.bak` next to the file in the pod.
+
+**`--file <path>` removes that requirement.** Every command that reads or
+edits `config.yaml` accepts it and operates on a local YAML instead — no
+kubectl, no cluster. Prefer this shape when you can, because it lets you
+validate before anything reaches production:
+
+```bash
+cli-anything-espresense companion config-fetch -o cfg.yaml    # needs kubectl
+cli-anything-espresense --json rooms rename "Spare" "Office" --file cfg.yaml
+cli-anything-espresense --json config doctor --file cfg.yaml  # exits 1 if broken
+cli-anything-espresense companion config-push cfg.yaml --restart
+```
+
+Local writes leave a `.bak` beside the file too. `--restart` is meaningless
+for a local file, so it is reported back as `restart_skipped` rather than
+silently ignored.
+
+**`config doctor` is the first thing to run** when a user reports a node in
+the wrong room, a device not being located, or a room missing from Home
+Assistant. It exits 1 on any error and returns machine-readable findings
+with stable `code` values you can branch on:
+
+```json
+{
+  "ok": false,
+  "errors": [{"level": "error", "code": "dangling_room_ref",
+              "node": "office-node", "room": "Ghost",
+              "message": "node 'office-node' points at room 'Ghost', which no floor declares"}],
+  "warnings": [],
+  "counts": {"floors": 1, "rooms": 2, "nodes": 2, "errors": 1, "warnings": 0}
+}
+```
+
+Codes: `dangling_room_ref`, `room_ref_whitespace`, `duplicate_room_name`,
+`duplicate_node_name`, `duplicate_floor_id`, `node_missing_room`,
+`node_missing_name`, `bad_node_point`, `degenerate_polygon`,
+`room_without_node`, `no_floors`, `no_nodes`.
+
+**Deleting a room is guarded.** `rooms delete` refuses to run while any node
+still references it, and returns `orphaned_nodes` naming them — repoint
+those with `rooms repoint-node` first, or pass `--force` and accept that
+`config doctor` will then report `dangling_room_ref`.
+
+**Retiring a node takes two commands**: `nodes delete <id>` clears the
+companion's runtime settings/telemetry, `nodes remove-from-config <name>`
+removes the entry from `config.yaml`.
 
 ## Typical workflows
 
@@ -113,6 +163,37 @@ cli-anything-espresense rooms rotate \
   --map "Noah Bedroom=Sophie Bedroom" \
   --map "Sophie Bedroom=Spare Room" --restart
 ```
+
+### Add a new node to a new room, safely
+
+```bash
+# 1. pull the live config and work on it locally
+cli-anything-espresense companion config-fetch -o cfg.yaml
+
+# 2. carve out the room polygon and place the node
+cli-anything-espresense --json rooms add gf "Study" \
+  --point 5,0 --point 9,0 --point 9,4 --point 5,4 --file cfg.yaml
+cli-anything-espresense --json nodes add study-node \
+  --room "Study" --point 7,2,1.5 --file cfg.yaml
+
+# 3. prove it is coherent BEFORE it reaches the cluster (exits 1 if not)
+cli-anything-espresense --json config doctor --file cfg.yaml
+
+# 4. ship it
+cli-anything-espresense companion config-push cfg.yaml --restart
+```
+
+### Diagnose "my device is never located in the study"
+
+```bash
+cli-anything-espresense --json config doctor          # against the live pod
+cli-anything-espresense --json rooms list             # node_names per room
+cli-anything-espresense --json nodes list             # online? correct room?
+cli-anything-espresense --json calibration summary    # R / RMSE sane?
+```
+
+A `dangling_room_ref` or `room_ref_whitespace` error explains it outright;
+`rooms repoint-node` or `rooms rename` is the fix.
 
 ### Recalibrate a single node remotely
 

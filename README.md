@@ -44,18 +44,61 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 
 | Group | Purpose |
 |---|---|
-| `companion` | `api / info / config-get / config-fetch / config-push / restart / stream` — talk to the companion service |
-| `rooms` | `list / rename / rotate / repoint-node` — edit room polygons + node room references (atomic, supports cycles) |
-| `nodes` | `list / show / rename-in-config / set-point / restart / delete / update-firmware / put-settings` — manage nodes from the companion side |
-| `node` | `info / restart / settings / set / rename / scan-wifi / devices` — direct HTTP to one ESP firmware node |
+| `companion` | `api / info / config-get / config-fetch / config-push / restart / stream / locator / firmware-types / pod` — talk to the companion service |
+| `rooms` | `list / add / delete / rename / rotate / repoint-node` — edit room polygons + node room references (atomic, supports cycles) |
+| `floors` | `list / show` — inspect the floors declared in config.yaml |
+| `nodes` | `list / show / add / remove-from-config / rename-in-config / set-point / restart / delete / update-firmware / put-settings` — manage nodes from the companion side |
+| `node` | `info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete` — direct HTTP to one ESP firmware node |
 | `devices` | `list / show / set / delete` — tracked devices (phones, tags, beacons) |
 | `calibration` | `get / summary / reset / auto-optimize` |
 | `history` | `get` — per-device position history |
-| `mqtt` | `set-node / pub / watch` — raw MQTT pub/sub |
-| `config` | `show / save` (local connection profile) |
+| `mqtt` | `set-node / set-device / pub / watch` — raw MQTT pub/sub |
+| `config` | `show / save` (local connection profile) + `doctor` (validate config.yaml) |
 | `repl` | Interactive shell (default with no subcommand) |
 
 All commands support `--json` for machine-readable output.
+
+### Working offline with `--file`
+
+Every command that reads or edits `config.yaml` accepts `--file <path>` to
+work against a local YAML instead of the running pod. **kubectl is not
+required in this mode.** That makes the documented fetch → edit → push loop
+completable, and lets you review a change before it ever reaches the cluster:
+
+```bash
+cli-anything-espresense companion config-fetch -o cfg.yaml   # pull (kubectl)
+cli-anything-espresense rooms rename "Spare Room" "Office" --file cfg.yaml
+cli-anything-espresense config doctor --file cfg.yaml        # validate
+cli-anything-espresense companion config-push cfg.yaml --restart
+```
+
+`--file` is available on `rooms list/add/delete/rename/rotate/repoint-node`,
+`nodes list/add/remove-from-config/rename-in-config/set-point`,
+`floors list/show` and `config doctor`. Writes leave a timestamped `.bak`
+next to the file, exactly as the in-pod writes do.
+
+### `config doctor`
+
+Detects the config drift that silently breaks room tracking — the failure
+mode `rooms rename` was built to repair, now catchable *before* it bites:
+
+```bash
+$ cli-anything-espresense config doctor --file cfg.yaml
+checked 1 floor(s), 1 room(s), 1 node(s)
+  ERROR [room_ref_whitespace] node 'lounge-node' `room:` is 'Lounge ' — the surrounding whitespace stops it matching the polygon.
+1 error(s), 0 warning(s)
+```
+
+Checks: dangling node `room:` references, whitespace-padded room names,
+duplicate room/node names and floor ids, malformed `point:` values,
+degenerate polygons, rooms with no node, nodes with no room. It is
+read-only, and **exits 1 on any error** (or any warning with `--strict`),
+so it can gate a push:
+
+```bash
+cli-anything-espresense config doctor --file cfg.yaml && \
+  cli-anything-espresense companion config-push cfg.yaml --restart
+```
 
 ## Quick examples
 
@@ -83,8 +126,20 @@ cli-anything-espresense node info 10.32.101.32
 cli-anything-espresense node rename 10.32.101.32 sophie-bedroom
 cli-anything-espresense node restart 10.32.101.32
 
+# Add a room and a node to a floor (offline, then push when happy)
+cli-anything-espresense rooms add gf "Study" \
+  --point 5,0 --point 9,0 --point 9,4 --point 5,4 --file cfg.yaml
+cli-anything-espresense nodes add study-node --room "Study" \
+  --point 7,2,1.5 --file cfg.yaml
+
+# Per-device config on one ESP node
+cli-anything-espresense node config-list 10.32.101.32
+cli-anything-espresense node config-set 10.32.101.32 apple:1005:9-12 \
+  --name "Jon Watch" --rssi-at-1m -59
+
 # Push a setting over MQTT (works even for offline nodes via retained)
 cli-anything-espresense mqtt set-node noah-bedroom absorption 2.8
+cli-anything-espresense mqtt set-device apple:1005:9-12 '{"name":"Jon Watch"}'
 cli-anything-espresense mqtt watch 'espresense/rooms/+/telemetry' --duration 10
 
 # Live device-position stream
@@ -98,6 +153,8 @@ cli_anything/espresense/
 ├── espresense_cli.py        # Click CLI + REPL
 ├── core/
 │   ├── companion_api.py     # REST endpoints (/api/state/*, /api/node/*, ...)
+│   ├── config_source.py     # where config.yaml lives: pod (kubectl) or local file
+│   ├── validate.py          # config.yaml consistency checks (`config doctor`)
 │   ├── config_yaml.py       # fetch / push YAML via kubectl
 │   ├── rooms.py             # polygon rename / rotate (with node fix-up)
 │   ├── nodes.py             # node config edits + live-state merge
@@ -126,9 +183,11 @@ the file on start, hence the `--restart` flag on every mutating command.
 python3 -m pytest cli_anything/espresense/tests/ -v
 ```
 
-16 unit tests cover the YAML round-trip, room rename + rotate (including
-atomic cycles and trailing-whitespace handling), and the per-node HTTP
-client — all against synthetic data, no live broker required.
+617 tests, 91% coverage — all against synthetic data on disk, no live
+broker, cluster or companion required. They cover the YAML round-trip, room
+rename + rotate (including atomic cycles and trailing-whitespace handling),
+the config validator, the per-node HTTP client, and full end-to-end CLI
+workflows driven through `--file` against a real config.yaml.
 
 ## License
 
