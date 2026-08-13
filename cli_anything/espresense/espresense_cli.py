@@ -13,6 +13,8 @@ from cli_anything.espresense.core import (
     config_source as config_source_core,
     config_yaml as config_core,
     devices as devices_core,
+    floors as floors_core,
+    geometry,
     history as history_core,
     k8s_backend,
     mqtt as mqtt_core,
@@ -27,6 +29,13 @@ from cli_anything.espresense.core import companion_api
 from cli_anything.espresense.utils.companion_client import CompanionClient, CompanionError
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+
+# Commands that take signed coordinates as positional arguments need this:
+# without `ignore_unknown_options`, click parses `rooms move Office -2 0` as an
+# option `-2` and refuses the command, which makes half the coordinate plane
+# unreachable from the shell. Declared options are still parsed normally; only
+# unrecognised dash-tokens fall through to the arguments.
+COORD_SETTINGS = {**CONTEXT_SETTINGS, "ignore_unknown_options": True}
 
 
 # ──────────────────────────────────────────────────────── helpers
@@ -133,6 +142,30 @@ def _print_table(rows: list[dict]) -> None:
 def _abort(message: str) -> None:
     click.echo(f"error: {message}", err=True)
     sys.exit(1)
+
+
+def _parse_xy(entry: str, flag: str = "--point") -> list[float]:
+    """Parse one `x,y` coordinate pair from a CLI option value."""
+    parts = str(entry).replace(" ", "").split(",")
+    if len(parts) != 2:
+        _abort(f"{flag} expected x,y, got {entry!r}")
+    try:
+        return [float(parts[0]), float(parts[1])]
+    except ValueError:
+        _abort(f"{flag} coordinates must be numbers, got {entry!r}")
+    return []  # unreachable; _abort exits
+
+
+def _parse_xyz(entry: str, label: str = "corner") -> list[float]:
+    """Parse one `x,y,z` triple (floor bounds corners, node points)."""
+    parts = str(entry).replace(" ", "").split(",")
+    if len(parts) != 3:
+        _abort(f"{label} expected x,y,z, got {entry!r}")
+    try:
+        return [float(parts[0]), float(parts[1]), float(parts[2])]
+    except ValueError:
+        _abort(f"{label} coordinates must be numbers, got {entry!r}")
+    return []  # unreachable; _abort exits
 
 
 # ──────────────────────────────────────────────────────── root
@@ -458,7 +491,7 @@ def companion_pod(ctx):
 
 @cli.group()
 def floors():
-    """Inspect the floors declared in config.yaml."""
+    """Inspect and edit the floors declared in config.yaml (incl. 3D bounds)."""
 
 
 @floors.command("list")
@@ -491,12 +524,185 @@ def floors_show(ctx, floor_id, config_file):
     emit(ctx, json.loads(json.dumps(floor, default=str)))
 
 
+@floors.command("add")
+@click.argument("floor_id")
+@click.option("--name", default=None, help="Human-readable floor name, e.g. 'First Floor'")
+@click.option("--bounds", default=None, help="Two corners as 'x,y,z x,y,z' (space separated)")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def floors_add(ctx, floor_id, name, bounds, restart, dry_run, config_file):
+    """Create an empty floor to hang rooms off.
+
+    Example:
+      floors add ff --name "First Floor" --bounds "0,0,0 10,10,2.4"
+    """
+    parsed_bounds = None
+    if bounds:
+        corners = str(bounds).split()
+        if len(corners) != 2:
+            _abort("--bounds expects two corners: 'x,y,z x,y,z'")
+        parsed_bounds = [_parse_xyz(c, "--bounds corner") for c in corners]
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = floors_core.add_floor(parsed, floor_id, name=name, bounds=parsed_bounds)
+    except (ValueError, geometry.GeometryError) as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@floors.command("rename")
+@click.argument("floor_id")
+@click.argument("name")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def floors_rename(ctx, floor_id, name, restart, dry_run, config_file):
+    """Change a floor's display `name:` (the `id` is left alone — see `floors retag`)."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = floors_core.rename_floor(parsed, floor_id, name)
+    except KeyError as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@floors.command("retag")
+@click.argument("old_id")
+@click.argument("new_id")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def floors_retag(ctx, old_id, new_id, restart, dry_run, config_file):
+    """Change a floor's `id` AND every node `floors:` entry pointing at it.
+
+    Doing only half of this leaves nodes referencing a floor that no longer
+    exists; `config doctor` reports that as dangling_floor_ref.
+    """
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = floors_core.retag(parsed, old_id, new_id)
+    except (KeyError, ValueError) as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run and out["id_changed"]:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@floors.command("set-bounds", context_settings=COORD_SETTINGS)
+@click.argument("floor_id")
+@click.argument("min_corner")
+@click.argument("max_corner")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def floors_set_bounds(ctx, floor_id, min_corner, max_corner, restart, dry_run, config_file):
+    """Set a floor's 3D bounds explicitly.
+
+    Example:
+      floors set-bounds gf 0,0,0 10,8,2.4
+    """
+    bounds = [_parse_xyz(min_corner, "MIN_CORNER"), _parse_xyz(max_corner, "MAX_CORNER")]
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = floors_core.set_bounds(parsed, floor_id, bounds)
+    except (KeyError, geometry.GeometryError) as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@floors.command("fit-bounds")
+@click.argument("floor_id")
+@click.option("--margin", default=0.0, type=float, help="Padding in metres around the rooms")
+@click.option("--z-min", default=None, type=float, help="Floor height (default: keep/derive)")
+@click.option("--z-max", default=None, type=float, help="Ceiling height (default: keep/derive)")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def floors_fit_bounds(ctx, floor_id, margin, z_min, z_max, restart, dry_run, config_file):
+    """Recompute a floor's bounds from the room polygons on it.
+
+    Run this after `rooms add` / `rooms move` / `rooms scale` so the floor box
+    still contains its rooms. Pair with --dry-run to see the numbers first.
+    """
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = floors_core.fit_bounds(parsed, floor_id, margin=margin, z_min=z_min, z_max=z_max)
+    except (KeyError, ValueError, geometry.GeometryError) as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@floors.command("delete")
+@click.argument("floor_id")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@click.option("--force", is_flag=True, help="Delete even though rooms/nodes still reference it")
+@config_file_option
+@click.pass_context
+def floors_delete(ctx, floor_id, restart, dry_run, force, config_file):
+    """Delete a floor and the rooms on it.
+
+    Refuses to write while any node still points at one of those rooms (or
+    lists the floor) unless --force is given; the affected node names come
+    back as `orphaned_nodes` / `nodes_referencing` either way.
+    """
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    out = floors_core.delete_floor(parsed, floor_id)
+    out["dry_run"] = dry_run
+    if not out["deleted"]:
+        out["refused"] = f"no floor with id={floor_id!r}"
+        emit(ctx, out)
+        sys.exit(1)
+    blockers = sorted(set(out["orphaned_nodes"]) | set(out["nodes_referencing"]))
+    if blockers and not force:
+        out["pushed"] = None
+        out["refused"] = (
+            f"{len(blockers)} node(s) still tied to floor {floor_id!r} "
+            f"({', '.join(str(b) for b in blockers)}); repoint them first or pass --force"
+        )
+        emit(ctx, out)
+        sys.exit(1)
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
 # ──────────────────────────────────────────────────────── rooms
 
 
 @cli.group()
 def rooms():
-    """List and rename rooms (floor polygons) in the companion config."""
+    """List, rename, reshape and measure rooms (floor polygons) in the config."""
 
 
 @rooms.command("list")
@@ -624,15 +830,7 @@ def rooms_add(ctx, floor_id, name, points, color, restart, dry_run, config_file)
     Example:
       rooms add gf "Office" --point 0,0 --point 4,0 --point 4,3 --point 0,3
     """
-    parsed_points: list[list[float]] = []
-    for entry in points:
-        parts = entry.replace(" ", "").split(",")
-        if len(parts) != 2:
-            _abort(f"--point expected x,y, got {entry!r}")
-        try:
-            parsed_points.append([float(parts[0]), float(parts[1])])
-        except ValueError:
-            _abort(f"--point coordinates must be numbers, got {entry!r}")
+    parsed_points: list[list[float]] = [_parse_xy(entry) for entry in points]
     source = make_config_source(ctx, config_file)
     _, parsed = source.fetch()
     try:
@@ -673,6 +871,169 @@ def rooms_delete(ctx, name, restart, dry_run, force, config_file):
         emit(ctx, out)
         sys.exit(1)
     if not dry_run and out["deleted"]:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@rooms.command("geometry")
+@click.option("--floor", default=None, help="Restrict to this floor id")
+@config_file_option
+@click.pass_context
+def rooms_geometry(ctx, floor, config_file):
+    """Area, perimeter, centroid, bbox and node containment per room.
+
+    `nodes_outside` lists nodes whose `point:` falls outside the room their
+    `room:` field names — a config that validates but localises wrongly.
+    Read-only.
+    """
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    emit(ctx, rooms_core.geometry_report(parsed, floor_id=floor))
+
+
+@rooms.command("locate", context_settings=COORD_SETTINGS)
+@click.argument("x", type=float)
+@click.argument("y", type=float)
+@click.option("--floor", default=None, help="Restrict to this floor id")
+@config_file_option
+@click.pass_context
+def rooms_locate(ctx, x, y, floor, config_file):
+    """Which room polygon(s) contain (X, Y)?
+
+    Use before `nodes set-point` to confirm a coordinate lands where you think
+    it does. Exits 1 when the point is in no room at all. Read-only.
+    """
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    hits = rooms_core.locate_point(parsed, x, y, floor_id=floor)
+    if not hits:
+        emit(ctx, [] if ctx.obj.get("as_json") else f"({x}, {y}) is not inside any room")
+        sys.exit(1)
+    emit(ctx, hits)
+
+
+@rooms.command("overlaps")
+@click.option("--floor", default=None, help="Restrict to this floor id")
+@config_file_option
+@click.pass_context
+def rooms_overlaps(ctx, floor, config_file):
+    """Report pairs of rooms on one floor whose polygons share area.
+
+    Rooms that merely share a wall are not overlaps. Exits 1 if any overlap is
+    found, so it can gate a push. Read-only.
+    """
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    pairs = rooms_core.find_overlaps(parsed, floor_id=floor)
+    if not pairs:
+        emit(ctx, [] if ctx.obj.get("as_json") else "no overlapping rooms")
+        return
+    emit(ctx, pairs)
+    sys.exit(1)
+
+
+@rooms.command("set-points")
+@click.argument("name")
+@click.option(
+    "--point", "points", multiple=True, required=True, help="Polygon vertex as x,y (repeatable)"
+)
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def rooms_set_points(ctx, name, points, restart, dry_run, config_file):
+    """Replace a room's polygon wholesale (redraw it).
+
+    Example:
+      rooms set-points Office --point 0,0 --point 5,0 --point 5,4 --point 0,4
+    """
+    parsed_points = [_parse_xy(entry) for entry in points]
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = rooms_core.set_points(parsed, name, parsed_points)
+    except (KeyError, geometry.GeometryError) as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@rooms.command("move", context_settings=COORD_SETTINGS)
+@click.argument("name")
+@click.argument("dx", type=float)
+@click.argument("dy", type=float)
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def rooms_move(ctx, name, dx, dy, restart, dry_run, config_file):
+    """Translate a whole room polygon by (DX, DY) metres, shape unchanged."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = rooms_core.move_room(parsed, name, dx, dy)
+    except (KeyError, geometry.GeometryError) as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@rooms.command("scale")
+@click.argument("name")
+@click.argument("factor", type=float)
+@click.option(
+    "--about-origin",
+    is_flag=True,
+    help="Scale about (0,0) instead of the room's own centroid (which keeps it in place)",
+)
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def rooms_scale(ctx, name, factor, about_origin, restart, dry_run, config_file):
+    """Grow or shrink a room polygon by FACTOR (1.1 = 10% bigger)."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = rooms_core.scale_room(parsed, name, factor, about_origin=about_origin)
+    except (KeyError, geometry.GeometryError) as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@rooms.command("set-color")
+@click.argument("name")
+@click.argument("color", required=False)
+@click.option("--clear", is_flag=True, help="Remove the room's color instead of setting one")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def rooms_set_color(ctx, name, color, clear, restart, dry_run, config_file):
+    """Set (or --clear) a room's `color:`, e.g. rooms set-color Office '#a3c9f9'."""
+    if clear and color:
+        _abort("pass either a COLOR or --clear, not both")
+    if not clear and not color:
+        _abort("COLOR is required unless --clear is given")
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = rooms_core.set_color(parsed, name, None if clear else color)
+    except KeyError as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run:
         out["pushed"] = source.push(parsed, restart=restart)
     emit(ctx, out)
 
@@ -743,7 +1104,7 @@ def nodes_rename_in_config(ctx, old, new, restart, dry_run, config_file):
     emit(ctx, out)
 
 
-@nodes.command("set-point")
+@nodes.command("set-point", context_settings=COORD_SETTINGS)
 @click.argument("name")
 @click.argument("x", type=float)
 @click.argument("y", type=float)
@@ -761,6 +1122,38 @@ def nodes_set_point(ctx, name, x, y, z, restart, dry_run, config_file):
     if not dry_run and out["found"]:
         push = source.push(parsed, restart=restart)
         out["pushed"] = push
+    emit(ctx, out)
+
+
+@nodes.command("place")
+@click.argument("name")
+@click.option("--room", default=None, help="Room to place it in (default: its current room)")
+@click.option("--z", default=None, type=float, help="Height in metres (default: keep, else 2.4)")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def nodes_place(ctx, name, room, z, restart, dry_run, config_file):
+    """Snap a node's `point:` to the centroid of its room.
+
+    The coordinate-free way to fix (or initialise) node placement: the centroid
+    is guaranteed to be inside a convex room, so the node stops being drawn
+    outside the polygon it names. Passing --room also repoints the node.
+    """
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = nodes_core.place_in_room(parsed, name, room=room, z=z)
+    except (KeyError, ValueError, geometry.GeometryError) as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not out["found"]:
+        out["refused"] = f"no node named {name!r} in config.yaml"
+        emit(ctx, out)
+        sys.exit(1)
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
     emit(ctx, out)
 
 

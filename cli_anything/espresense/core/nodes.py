@@ -173,3 +173,52 @@ def add(
         "room": entry.get("room"),
         "point": entry.get("point"),
     }
+
+
+def place_in_room(
+    parsed: Any,
+    name: str,
+    *,
+    room: str | None = None,
+    z: float | None = None,
+) -> dict:
+    """Move a node to the centroid of a room, optionally repointing it there.
+
+    `set_point` already existed, but it required the operator to work out
+    coordinates that land inside the right polygon — the exact step that
+    produces a node drawn in the wrong room (validate.NODE_POINT_OUTSIDE_ROOM).
+    The centroid is always inside a convex room and is the sane default spot
+    for "this receiver is in the kitchen, roughly in the middle".
+
+    `z` defaults to the node's current height, then 2.4 m (a plausible
+    ceiling/shelf mount) so a brand-new node still gets a 3D point.
+    Returns {found, room, point, before, repointed}.
+    """
+    from cli_anything.espresense.core import rooms as rooms_core
+
+    for node in parsed.get("nodes") or []:
+        if node.get("name") != name:
+            continue
+        target_room = room if room is not None else (node.get("room") or "").strip()
+        if not target_room:
+            raise ValueError(f"node {name!r} has no `room:` — pass an explicit room")
+        cx, cy = rooms_core.centroid_of(parsed, target_room)
+        before = list(node.get("point") or [])
+        height = z
+        if height is None:
+            height = float(before[2]) if len(before) == 3 else 2.4
+        point = [round(cx, 4), round(cy, 4), float(height)]
+        node["point"] = yaml_io.flow_seq(point)
+        repointed = False
+        if room is not None and (node.get("room") or "").strip() != target_room:
+            node["room"] = target_room
+            repointed = True
+        return {
+            "found": True,
+            "name": name,
+            "room": target_room,
+            "before": before,
+            "point": point,
+            "repointed": repointed,
+        }
+    return {"found": False, "name": name, "room": None, "before": None, "point": None}

@@ -211,3 +211,172 @@ class TestRegressionRoomsDrift:
         cfg2 = _cfg()
         rooms.rename(cfg2, "Office", "Study")
         assert validate.check(cfg2)["ok"] is True
+
+
+class TestGeometryFindings:
+    """The geometry-level drift class: string-valid configs that localise wrong.
+
+    Every check here is warning-level except structurally broken references,
+    because unusual-but-deliberate floor plans exist and `config doctor` must
+    not fail a push on taste.
+    """
+
+    def test_node_point_outside_its_room_is_a_warning(self):
+        cfg = _cfg()
+        cfg["nodes"][0]["point"] = [99.0, 99.0, 2.5]
+        report = validate.check(cfg)
+        assert validate.NODE_POINT_OUTSIDE_ROOM in codes(report, "warnings")
+        assert report["ok"] is True
+
+    def test_node_point_inside_its_room_is_silent(self):
+        assert validate.NODE_POINT_OUTSIDE_ROOM not in codes(_report_all(_cfg()), "warnings")
+
+    def test_node_on_the_room_boundary_is_accepted(self):
+        cfg = _cfg()
+        cfg["nodes"][0]["point"] = [0.0, 0.0, 2.5]  # exactly on a corner
+        assert validate.NODE_POINT_OUTSIDE_ROOM not in codes(_report_all(cfg), "warnings")
+
+    def test_finding_carries_the_node_room_and_point(self):
+        cfg = _cfg()
+        cfg["nodes"][0]["point"] = [99.0, 99.0, 2.5]
+        finding = _by_code(validate.check(cfg), validate.NODE_POINT_OUTSIDE_ROOM)
+        assert finding["node"] == "office-node"
+        assert finding["room"] == "Office"
+        assert finding["point"] == [99.0, 99.0, 2.5]
+
+    def test_malformed_point_is_not_double_reported(self):
+        cfg = _cfg()
+        cfg["nodes"][0]["point"] = [1.0, 2.0]  # BAD_NODE_POINT already covers this
+        report = validate.check(cfg)
+        assert validate.BAD_NODE_POINT in codes(report)
+        assert validate.NODE_POINT_OUTSIDE_ROOM not in codes(report, "warnings")
+
+    def test_dangling_floor_ref_is_an_error(self):
+        cfg = _cfg()
+        cfg["nodes"][0]["floors"] = ["attic"]
+        report = validate.check(cfg)
+        assert validate.DANGLING_FLOOR_REF in codes(report)
+        assert report["ok"] is False
+
+    def test_valid_floor_ref_is_silent(self):
+        cfg = _cfg()
+        cfg["nodes"][0]["floors"] = ["gf"]
+        assert validate.DANGLING_FLOOR_REF not in codes(validate.check(cfg))
+
+    def test_retag_fixes_a_dangling_floor_ref(self):
+        from cli_anything.espresense.core import floors as floors_core
+
+        cfg = _cfg()
+        cfg["nodes"][0]["floors"] = ["gf"]
+        floors_core.retag(cfg, "gf", "ground")
+        assert validate.check(cfg)["ok"] is True
+
+    def test_bare_id_edit_is_caught(self):
+        cfg = _cfg()
+        cfg["nodes"][0]["floors"] = ["gf"]
+        cfg["floors"][0]["id"] = "ground"  # hand-edit that forgot the nodes
+        assert validate.DANGLING_FLOOR_REF in codes(validate.check(cfg))
+
+    def test_unparseable_bounds_is_an_error(self):
+        cfg = _cfg()
+        cfg["floors"][0]["bounds"] = [[0, 0], [1, 1]]
+        report = validate.check(cfg)
+        assert validate.BAD_FLOOR_BOUNDS in codes(report)
+        assert report["ok"] is False
+
+    def test_room_escaping_floor_bounds_is_a_warning(self):
+        cfg = _cfg()
+        cfg["floors"][0]["bounds"] = [[0, 0, 0], [5, 5, 3]]  # Kitchen reaches x=8
+        report = validate.check(cfg)
+        assert validate.ROOM_OUTSIDE_FLOOR_BOUNDS in codes(report, "warnings")
+        assert report["ok"] is True
+
+    def test_rooms_inside_bounds_are_silent(self):
+        cfg = _cfg()
+        cfg["floors"][0]["bounds"] = [[0, 0, 0], [10, 10, 3]]
+        assert validate.ROOM_OUTSIDE_FLOOR_BOUNDS not in codes(_report_all(cfg), "warnings")
+
+    def test_no_bounds_means_no_bounds_checks(self):
+        cfg = _cfg()  # the fixture declares no bounds at all
+        report = _report_all(cfg)
+        assert validate.ROOM_OUTSIDE_FLOOR_BOUNDS not in codes(report, "warnings")
+        assert validate.NODE_POINT_OUTSIDE_BOUNDS not in codes(report, "warnings")
+
+    def test_node_above_the_ceiling_is_a_warning(self):
+        cfg = _cfg()
+        cfg["floors"][0]["bounds"] = [[0, 0, 0], [10, 10, 2.0]]
+        cfg["nodes"][0]["point"] = [1.0, 2.0, 2.5]  # 2.5 m in a 2.0 m room
+        assert validate.NODE_POINT_OUTSIDE_BOUNDS in codes(_report_all(cfg), "warnings")
+
+    def test_node_bounds_check_follows_explicit_floor_refs(self):
+        cfg = _cfg()
+        cfg["floors"][0]["bounds"] = [[0, 0, 0], [10, 10, 2.0]]
+        cfg["nodes"][0]["floors"] = ["gf"]
+        cfg["nodes"][0]["room"] = None
+        cfg["nodes"][0]["point"] = [1.0, 2.0, 9.0]
+        assert validate.NODE_POINT_OUTSIDE_BOUNDS in codes(_report_all(cfg), "warnings")
+
+    def test_overlapping_rooms_are_a_warning(self):
+        cfg = _cfg()
+        cfg["floors"][0]["rooms"][1]["points"] = [[2, 0], [6, 0], [6, 3], [2, 3]]
+        report = validate.check(cfg)
+        assert validate.ROOM_OVERLAP in codes(report, "warnings")
+        assert report["ok"] is True
+
+    def test_rooms_sharing_a_wall_are_not_flagged(self):
+        # The fixture is two rooms meeting at x=4 — the normal case.
+        assert validate.ROOM_OVERLAP not in codes(_report_all(_cfg()), "warnings")
+
+    def test_overlap_finding_names_both_rooms(self):
+        cfg = _cfg()
+        cfg["floors"][0]["rooms"][1]["points"] = [[2, 0], [6, 0], [6, 3], [2, 3]]
+        finding = _by_code(validate.check(cfg), validate.ROOM_OVERLAP, "warnings")
+        assert {finding["room"], finding["other_room"]} == {"Office", "Kitchen"}
+
+    def test_same_footprint_on_two_floors_is_not_an_overlap(self):
+        cfg = _cfg()
+        cfg["floors"].append(
+            {
+                "id": "ff",
+                "rooms": [{"name": "Bedroom", "points": [[0, 0], [4, 0], [4, 3], [0, 3]]}],
+            }
+        )
+        cfg["nodes"].append({"name": "bed-node", "room": "Bedroom", "point": [1.0, 1.0, 2.2]})
+        assert validate.ROOM_OVERLAP not in codes(_report_all(cfg), "warnings")
+
+    def test_degenerate_polygons_are_skipped_by_geometry_checks(self):
+        cfg = _cfg()
+        cfg["floors"][0]["rooms"][0]["points"] = [[0, 0], [1, 1]]
+        report = validate.check(cfg)
+        assert validate.DEGENERATE_POLYGON in codes(report, "warnings")
+        assert validate.NODE_POINT_OUTSIDE_ROOM not in codes(report, "warnings")
+        assert validate.ROOM_OVERLAP not in codes(report, "warnings")
+
+    def test_geometry_checks_do_not_mutate_the_config(self):
+        import copy
+
+        cfg = _cfg()
+        cfg["floors"][0]["bounds"] = [[0, 0, 0], [10, 10, 3]]
+        cfg["nodes"][0]["point"] = [99.0, 99.0, 2.5]
+        snapshot = copy.deepcopy(cfg)
+        validate.check(cfg)
+        assert cfg == snapshot
+
+    def test_strict_mode_callers_can_gate_on_geometry_warnings(self):
+        cfg = _cfg()
+        cfg["nodes"][0]["point"] = [99.0, 99.0, 2.5]
+        report = validate.check(cfg)
+        # `config doctor --strict` fails on any warning; that is the hook.
+        assert report["counts"]["warnings"] >= 1
+
+
+def _report_all(cfg):
+    return validate.check(cfg)
+
+
+def _by_code(report, code, level="errors"):
+    """First finding with `code`, searching errors and warnings alike."""
+    for finding in report["errors"] + report["warnings"]:
+        if finding["code"] == code:
+            return finding
+    raise AssertionError(f"{code} not found in report")
