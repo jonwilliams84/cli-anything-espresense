@@ -16,11 +16,22 @@ Findings are split into:
 
 Every finding is a dict with a stable `code` so an agent can branch on it
 without parsing prose.
+
+A second class of drift is *geometric* rather than textual: the `room:` string
+matches a polygon, so every string-level check passes, but the node's `point:`
+is nowhere inside that polygon — or two polygons on one floor overlap, or a
+room sticks out past its floor `bounds`. Those configs load, start, and
+localise to the wrong place, which is far harder to debug than a hard error.
+`geometry.py` supplies the maths; the checks here stay pure and warning-level,
+because unusual-but-intentional floor plans exist and this must not block a
+push on taste.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from cli_anything.espresense.core import geometry
 
 # Stable finding codes. Keep these strings frozen — callers match on them.
 DANGLING_ROOM_REF = "dangling_room_ref"
@@ -35,6 +46,13 @@ DEGENERATE_POLYGON = "degenerate_polygon"
 ROOM_WITHOUT_NODE = "room_without_node"
 NO_FLOORS = "no_floors"
 NO_NODES = "no_nodes"
+# Geometry-level findings (added later; same stability guarantee).
+DANGLING_FLOOR_REF = "dangling_floor_ref"
+BAD_FLOOR_BOUNDS = "bad_floor_bounds"
+NODE_POINT_OUTSIDE_ROOM = "node_point_outside_room"
+NODE_POINT_OUTSIDE_BOUNDS = "node_point_outside_bounds"
+ROOM_OUTSIDE_FLOOR_BOUNDS = "room_outside_floor_bounds"
+ROOM_OVERLAP = "room_overlap"
 
 
 def _finding(level: str, code: str, message: str, **ctx) -> dict:
@@ -99,6 +117,164 @@ def _room_index(parsed: Any) -> tuple[dict[str, list[str]], list[dict]]:
                 )
             )
     return index, findings
+
+
+def _polygon_of(parsed: Any) -> dict[str, dict]:
+    """room name -> {floor_id, polygon|None}. Invalid polygons map to None.
+
+    A polygon that will not normalize is already reported by
+    DEGENERATE_POLYGON / caught by the config author; the geometry checks just
+    skip it rather than emitting a second finding for the same defect.
+    """
+    out: dict[str, dict] = {}
+    for fl in parsed.get("floors") or []:
+        for room in fl.get("rooms") or []:
+            name = room.get("name")
+            if name is None or name in out:
+                continue
+            try:
+                poly = geometry.normalize_polygon(room.get("points"))
+            except geometry.GeometryError:
+                poly = None
+            out[name] = {"floor_id": fl.get("id"), "polygon": poly}
+    return out
+
+
+def _node_point(node: Any) -> list | None:
+    """A node's point as 3 numbers, or None when absent/malformed."""
+    point = node.get("point")
+    if point is None:
+        return None
+    coords = list(point)
+    if len(coords) != 3 or not all(_is_number(c) for c in coords):
+        return None  # already reported as BAD_NODE_POINT
+    return [float(c) for c in coords]
+
+
+def _geometry_findings(parsed: Any) -> list[dict]:
+    """Geometric consistency checks. Pure; every finding is a warning except
+    structurally-broken references (`floors:` refs, unparseable `bounds:`)."""
+    findings: list[dict] = []
+    floors = parsed.get("floors") or []
+    floor_ids = {fl.get("id") for fl in floors if fl.get("id") is not None}
+    polygons = _polygon_of(parsed)
+
+    # 1. node `floors:` entries that name no declared floor
+    for i, node in enumerate(parsed.get("nodes") or []):
+        label = node.get("name") or f"<nodes[{i}]>"
+        for ref in node.get("floors") or []:
+            if ref not in floor_ids:
+                findings.append(
+                    _finding(
+                        "error",
+                        DANGLING_FLOOR_REF,
+                        f"node {label!r} lists floor {ref!r}, which no floor declares "
+                        "(`floors retag` rewrites both halves together)",
+                        node=label,
+                        floor_id=ref,
+                    )
+                )
+
+    # 2. node `point:` outside the polygon its `room:` names
+    for i, node in enumerate(parsed.get("nodes") or []):
+        label = node.get("name") or f"<nodes[{i}]>"
+        room_name = node.get("room")
+        room_name = room_name.strip() if isinstance(room_name, str) else room_name
+        entry = polygons.get(room_name)
+        point = _node_point(node)
+        if not entry or entry["polygon"] is None or point is None:
+            continue
+        if not geometry.contains_point(entry["polygon"], point[0], point[1]):
+            findings.append(
+                _finding(
+                    "warning",
+                    NODE_POINT_OUTSIDE_ROOM,
+                    f"node {label!r} sits at [{point[0]}, {point[1]}] which is outside "
+                    f"room {room_name!r} — the config is valid but the node will be "
+                    "drawn in the wrong place",
+                    node=label,
+                    room=room_name,
+                    point=point,
+                )
+            )
+
+    # 3/4. rooms and nodes escaping their floor `bounds:`
+    for fl in floors:
+        fid = fl.get("id")
+        raw_bounds = fl.get("bounds")
+        if raw_bounds is None:
+            continue
+        try:
+            bounds = geometry.normalize_bounds(raw_bounds)
+        except geometry.GeometryError as exc:
+            findings.append(
+                _finding("error", BAD_FLOOR_BOUNDS, f"floor {fid!r} `bounds:` {exc}", floor_id=fid)
+            )
+            continue
+        room_names = []
+        for room in fl.get("rooms") or []:
+            name = room.get("name")
+            room_names.append(name)
+            entry = polygons.get(name)
+            if not entry or entry["polygon"] is None:
+                continue
+            if not geometry.polygon_in_bounds(entry["polygon"], bounds):
+                findings.append(
+                    _finding(
+                        "warning",
+                        ROOM_OUTSIDE_FLOOR_BOUNDS,
+                        f"room {name!r} extends past floor {fid!r} bounds "
+                        "(`floors fit-bounds` recomputes them from the rooms)",
+                        room=name,
+                        floor_id=fid,
+                    )
+                )
+        for i, node in enumerate(parsed.get("nodes") or []):
+            label = node.get("name") or f"<nodes[{i}]>"
+            refs = node.get("floors") or []
+            room_ref = node.get("room")
+            room_ref = room_ref.strip() if isinstance(room_ref, str) else room_ref
+            on_floor = fid in refs or (not refs and room_ref in room_names)
+            point = _node_point(node)
+            if not on_floor or point is None:
+                continue
+            if not geometry.point_in_bounds(bounds, point[0], point[1], point[2]):
+                findings.append(
+                    _finding(
+                        "warning",
+                        NODE_POINT_OUTSIDE_BOUNDS,
+                        f"node {label!r} at {point} is outside floor {fid!r} bounds",
+                        node=label,
+                        floor_id=fid,
+                        point=point,
+                    )
+                )
+
+    # 5. overlapping rooms on one floor make "which room?" ambiguous
+    for fl in floors:
+        fid = fl.get("id")
+        rooms_list = fl.get("rooms") or []
+        polys = []
+        for room in rooms_list:
+            try:
+                polys.append((room.get("name"), geometry.normalize_polygon(room.get("points"))))
+            except geometry.GeometryError:
+                continue
+        for a in range(len(polys)):
+            for b in range(a + 1, len(polys)):
+                if geometry.overlaps(polys[a][1], polys[b][1]):
+                    findings.append(
+                        _finding(
+                            "warning",
+                            ROOM_OVERLAP,
+                            f"rooms {polys[a][0]!r} and {polys[b][0]!r} overlap on floor "
+                            f"{fid!r}; a device in the shared area is ambiguous",
+                            floor_id=fid,
+                            room=polys[a][0],
+                            other_room=polys[b][0],
+                        )
+                    )
+    return findings
 
 
 def check(parsed: Any) -> dict:
@@ -221,6 +397,8 @@ def check(parsed: Any) -> dict:
                     room=room_name,
                 )
             )
+
+    findings.extend(_geometry_findings(parsed))
 
     errors = [f for f in findings if f["level"] == "error"]
     warnings = [f for f in findings if f["level"] == "warning"]

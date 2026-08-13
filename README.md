@@ -45,9 +45,9 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 | Group | Purpose |
 |---|---|
 | `companion` | `api / info / config-get / config-fetch / config-push / restart / stream / locator / firmware-types / pod` — talk to the companion service |
-| `rooms` | `list / add / delete / rename / rotate / repoint-node` — edit room polygons + node room references (atomic, supports cycles) |
-| `floors` | `list / show` — inspect the floors declared in config.yaml |
-| `nodes` | `list / show / add / remove-from-config / rename-in-config / set-point / restart / delete / update-firmware / put-settings` — manage nodes from the companion side |
+| `rooms` | `list / add / delete / rename / rotate / repoint-node / geometry / locate / overlaps / set-points / move / scale / set-color` — edit room polygons + node room references (atomic, supports cycles) and reason about their geometry |
+| `floors` | `list / show / add / rename / retag / set-bounds / fit-bounds / delete` — full floor CRUD in config.yaml |
+| `nodes` | `list / show / add / place / remove-from-config / rename-in-config / set-point / restart / delete / update-firmware / put-settings` — manage nodes from the companion side |
 | `node` | `info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete` — direct HTTP to one ESP firmware node |
 | `devices` | `list / show / set / delete` — tracked devices (phones, tags, beacons) |
 | `calibration` | `get / summary / reset / auto-optimize` |
@@ -72,10 +72,10 @@ cli-anything-espresense config doctor --file cfg.yaml        # validate
 cli-anything-espresense companion config-push cfg.yaml --restart
 ```
 
-`--file` is available on `rooms list/add/delete/rename/rotate/repoint-node`,
-`nodes list/add/remove-from-config/rename-in-config/set-point`,
-`floors list/show` and `config doctor`. Writes leave a timestamped `.bak`
-next to the file, exactly as the in-pod writes do.
+`--file` is available on **every** config-reading or config-editing command:
+all of `rooms`, all of `floors`, the config-side `nodes` commands and
+`config doctor`. Writes leave a timestamped `.bak` next to the file, exactly
+as the in-pod writes do.
 
 ### `config doctor`
 
@@ -89,9 +89,15 @@ checked 1 floor(s), 1 room(s), 1 node(s)
 1 error(s), 0 warning(s)
 ```
 
-Checks: dangling node `room:` references, whitespace-padded room names,
-duplicate room/node names and floor ids, malformed `point:` values,
-degenerate polygons, rooms with no node, nodes with no room. It is
+Checks come in two families. **Textual:** dangling node `room:` references,
+whitespace-padded room names, duplicate room/node names and floor ids,
+malformed `point:` values, degenerate polygons, rooms with no node, nodes with
+no room, node `floors:` entries naming no declared floor. **Geometric:** a
+node whose `point:` is outside the room its `room:` names, two rooms
+overlapping on one floor, a room or node escaping its floor `bounds:`.
+
+That second family matters because those configs are *valid* — they load, the
+companion starts, and devices simply localise to the wrong place. It is
 read-only, and **exits 1 on any error** (or any warning with `--strict`),
 so it can gate a push:
 
@@ -99,6 +105,51 @@ so it can gate a push:
 cli-anything-espresense config doctor --file cfg.yaml && \
   cli-anything-espresense companion config-push cfg.yaml --restart
 ```
+
+### Floor-plan geometry
+
+Rooms are polygons and nodes are 3D points, so the harness can do arithmetic on
+them rather than making you edit coordinates by hand:
+
+```bash
+# What is each room, and is every node actually inside the room it claims?
+cli-anything-espresense rooms geometry --file cfg.yaml
+# → area, perimeter, centroid, bbox, nodes_inside, nodes_outside
+
+# Which room is this coordinate in? (exits 1 if none)
+cli-anything-espresense rooms locate 5 1 --file cfg.yaml
+
+# Do any two rooms on one floor share area? (exits 1 if so — gates a push)
+cli-anything-espresense rooms overlaps --file cfg.yaml
+
+# Redraw / nudge / resize / recolour a room
+cli-anything-espresense rooms set-points Office \
+  --point 0,0 --point 5,0 --point 5,4 --point 0,4 --file cfg.yaml
+cli-anything-espresense rooms move Office 1 -2 --file cfg.yaml
+cli-anything-espresense rooms scale Office 1.1 --file cfg.yaml   # about its centroid
+cli-anything-espresense rooms set-color Office '#a3c9f9' --file cfg.yaml
+
+# Put a node in the middle of its room — no coordinates to work out
+cli-anything-espresense nodes place office-node --file cfg.yaml
+cli-anything-espresense nodes place office-node --room Kitchen --file cfg.yaml
+```
+
+Build a whole floor from nothing, then let the harness derive the bounds:
+
+```bash
+cli-anything-espresense floors add bs --name "Basement" --file cfg.yaml
+cli-anything-espresense rooms add bs "Cellar" \
+  --point 0,0 --point 3,0 --point 3,3 --point 0,3 --file cfg.yaml
+cli-anything-espresense nodes add cellar-node --room Cellar --floor bs --file cfg.yaml
+cli-anything-espresense nodes place cellar-node --file cfg.yaml
+cli-anything-espresense floors fit-bounds bs --margin 0.25 --file cfg.yaml
+cli-anything-espresense config doctor --file cfg.yaml
+```
+
+`floors retag <old> <new>` changes a floor's `id` **and** every node `floors:`
+entry that referenced it — the floor-level twin of what `rooms rename` does for
+`room:`. `floors delete` refuses to strand nodes unless you pass `--force`, and
+names them either way.
 
 ## Quick examples
 
@@ -155,9 +206,11 @@ cli_anything/espresense/
 │   ├── companion_api.py     # REST endpoints (/api/state/*, /api/node/*, ...)
 │   ├── config_source.py     # where config.yaml lives: pod (kubectl) or local file
 │   ├── validate.py          # config.yaml consistency checks (`config doctor`)
+│   ├── geometry.py          # pure polygon / bounds maths (no I/O)
 │   ├── config_yaml.py       # fetch / push YAML via kubectl
-│   ├── rooms.py             # polygon rename / rotate (with node fix-up)
-│   ├── nodes.py             # node config edits + live-state merge
+│   ├── floors.py            # floor CRUD, retag, bounds fitting
+│   ├── rooms.py             # polygon rename / rotate / geometry (with node fix-up)
+│   ├── nodes.py             # node config edits, placement + live-state merge
 │   ├── node_direct.py       # per-ESP firmware HTTP client
 │   ├── devices.py           # tracked-device wrappers
 │   ├── calibration.py
@@ -183,11 +236,12 @@ the file on start, hence the `--restart` flag on every mutating command.
 python3 -m pytest cli_anything/espresense/tests/ -v
 ```
 
-617 tests, 91% coverage — all against synthetic data on disk, no live
+932 tests, 93% coverage — all against synthetic data on disk, no live
 broker, cluster or companion required. They cover the YAML round-trip, room
 rename + rotate (including atomic cycles and trailing-whitespace handling),
-the config validator, the per-node HTTP client, and full end-to-end CLI
-workflows driven through `--file` against a real config.yaml.
+the polygon/bounds maths (including the cases where two rooms must *not* be
+called overlapping), the config validator, the per-node HTTP client, and full
+end-to-end CLI workflows driven through `--file` against a real config.yaml.
 
 ## License
 

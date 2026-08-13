@@ -7,16 +7,16 @@ Python Click CLI + REPL for operating an ESPresense deployment from the terminal
 - Deps: click, prompt-toolkit, requests, websocket-client, ruamel.yaml, paho-mqtt.
 - Source: `cli_anything/espresense/`
   - `espresense_cli.py` — Click CLI + REPL (all command groups)
-  - `core/` — one module per concern: `companion_api.py`, `config_source.py`, `config_yaml.py`, `validate.py`, `rooms.py`, `nodes.py`, `node_direct.py`, `devices.py`, `calibration.py`, `history.py`, `stream.py`, `mqtt.py`, `k8s_backend.py`, `project.py`
+  - `core/` — one module per concern: `companion_api.py`, `config_source.py`, `config_yaml.py`, `validate.py`, `geometry.py`, `floors.py`, `rooms.py`, `nodes.py`, `node_direct.py`, `devices.py`, `calibration.py`, `history.py`, `stream.py`, `mqtt.py`, `k8s_backend.py`, `project.py`
   - `utils/` — `companion_client.py` (requests Session), `yaml_io.py` (ruamel round-trip), `repl_skin.py`
-  - `tests/` — 617 tests, 91% coverage, synthetic data, no live services
+  - `tests/` — 932 tests, 93% coverage, synthetic data, no live services
 - `setup.py` reads `cli_anything/espresense/README.md` (NOT the repo-root README) as long_description — keep that file present.
 - Skill manifest is duplicated at `skills/cli-anything-espresense/SKILL.md` and `cli_anything/espresense/skills/SKILL.md`.
 
 ## Commands
 ```bash
 pip install -e .                                          # install
-python3 -m pytest cli_anything/espresense/tests/ -v       # test (617 tests)
+python3 -m pytest cli_anything/espresense/tests/ -v       # test (932 tests)
 ruff check cli_anything/ && ruff format --check cli_anything/   # lint gate
 bandit -r cli_anything/ -ll -x '*/tests/*,*/test_*.py'    # security gate
 cli-anything-espresense --help                            # CLI help
@@ -38,6 +38,11 @@ Every command supports `--json`.
 - `rooms rename`/`rooms rotate` also fix every node `room:` reference atomically (rotate supports cycles). `core/validate.py` (`config doctor`) DETECTS that same drift; it is pure/read-only and exits 1 on error so it can gate a push.
 - New coordinate sequences must be built with `yaml_io.flow_seq()`, or ruamel dumps them as block ladders (`-   - 5.0`) next to the inline `[[0, 0], [4, 0]]` style the rest of the hand-authored file uses.
 - `nodes delete` (companion runtime state) and `nodes remove-from-config` (config.yaml) are different operations; retiring a node needs both.
+- `core/geometry.py` is pure maths (no I/O, no YAML, no config shape) so `validate.check` can call it and stay read-only. It raises `GeometryError` — not `ValueError`/`float()`'s `ValueError` — for non-numeric coordinates precisely so report builders (`rooms geometry`, `rooms locate`) can skip a bad row instead of tracebacking.
+- `geometry.overlaps` is a documented heuristic, and its most important property is a NEGATIVE: rooms sharing a wall or corner must never be reported as overlapping, or every real floor plan lights up. Probes are vertices *plus edge midpoints* — vertices alone miss two rectangles that half-overlap on the same y range. Tests in `test_geometry.py::TestOverlaps` pin both directions.
+- `floors retag` (change a floor `id`) must rewrite node `floors:` lists in the same call, exactly like `rooms rename` does for `room:`; `validate.DANGLING_FLOOR_REF` detects the half-done version.
+- Commands taking signed coordinates as positional args need `context_settings=COORD_SETTINGS` (`ignore_unknown_options`), otherwise click parses `rooms move Office -2 0` as an option `-2` and half the coordinate plane is unreachable. Currently on `rooms move`, `rooms locate`, `floors set-bounds`, `nodes set-point`; `test_cli_geometry.py::TestSignedCoordinateArguments` locks it in.
+- New geometry findings in `validate` are warnings, not errors: `node_point_outside_room`, `room_overlap`, `room_outside_floor_bounds`, `node_point_outside_bounds`. Deliberate — odd floor plans are legal, so they must not fail a push unless `--strict`. `rooms overlaps` exits 1 on its own for callers who want that one check to gate.
 
 ## Conventions
 - MIT licensed. Adding a command group = a `core/` module + wiring in `espresense_cli.py` + unit tests for the core module + E2E CLI tests (`CliRunner`) asserting `--json` parses and `--help` works.
