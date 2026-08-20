@@ -10,6 +10,7 @@ import click
 
 from cli_anything.espresense.core import (
     calibration as calibration_core,
+    config_devices as config_devices_core,
     config_source as config_source_core,
     config_yaml as config_core,
     devices as devices_core,
@@ -22,6 +23,7 @@ from cli_anything.espresense.core import (
     nodes as nodes_core,
     project,
     rooms as rooms_core,
+    settings as settings_core,
     stream as stream_core,
     validate as validate_core,
 )
@@ -1429,7 +1431,8 @@ def node_config_delete(ctx, host, device_id):
 
 @cli.group()
 def devices():
-    """Tracked-device commands (companion's view of phones/tags/beacons)."""
+    """Tracked devices (phones/tags/beacons): the companion's live view, and
+    the durable `devices:` registry in config.yaml (`...-config` commands)."""
 
 
 @devices.command("list")
@@ -1478,6 +1481,324 @@ def devices_delete(ctx, device_id):
     client = make_client(ctx)
     devices_core.delete_device(client, device_id)
     emit(ctx, {"device_id": device_id, "deleted": True})
+
+
+# ── devices: the config.yaml registry (durable) vs the live view above ───────
+#
+# `devices set` edits the companion's runtime store; `devices update-in-config`
+# edits config.yaml. Same distinction as `nodes delete` vs
+# `nodes remove-from-config` — retiring a beacon for good needs both.
+
+
+@devices.command("list-in-config")
+@config_file_option
+@click.pass_context
+def devices_list_in_config(ctx, config_file):
+    """List the `devices:` block of config.yaml (the durable tracked list)."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    emit(ctx, config_devices_core.list_devices(parsed))
+
+
+@devices.command("show-in-config")
+@click.argument("device_id")
+@config_file_option
+@click.pass_context
+def devices_show_in_config(ctx, device_id, config_file):
+    """Show one configured device by id."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        emit(ctx, config_devices_core.get(parsed, device_id))
+    except KeyError as exc:
+        _abort(str(exc))
+
+
+@devices.command("add-to-config")
+@click.argument("device_id")
+@click.option("--name", default=None, help="Friendly name the companion reports")
+@click.option(
+    "--rssi-at-1m",
+    default=None,
+    type=float,
+    help="Reference RSSI at 1 m for this beacon (written as `rssi@1m:`)",
+)
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def devices_add_to_config(ctx, device_id, name, rssi_at_1m, restart, dry_run, config_file):
+    """Add a tracked device to config.yaml.
+
+    Example:
+      devices add-to-config 'irk:abc123' --name Phone --rssi-at-1m -65
+    """
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = config_devices_core.add(parsed, device_id, name=name, rssi_at_1m=rssi_at_1m)
+    except config_devices_core.DeviceConfigError as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@devices.command("update-in-config")
+@click.argument("device_id")
+@click.option("--name", default=None, help="New friendly name")
+@click.option("--clear-name", is_flag=True, help="Remove the device's `name:`")
+@click.option("--rssi-at-1m", default=None, type=float, help="New reference RSSI at 1 m")
+@click.option("--clear-rssi", is_flag=True, help="Remove the device's `rssi@1m:`")
+@click.option("--new-id", default=None, help="Rewrite the device's `id:`")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def devices_update_in_config(
+    ctx, device_id, name, clear_name, rssi_at_1m, clear_rssi, new_id, restart, dry_run, config_file
+):
+    """Edit a configured device's name / reference RSSI / id."""
+    if clear_name and name is not None:
+        _abort("pass either --name or --clear-name, not both")
+    if clear_rssi and rssi_at_1m is not None:
+        _abort("pass either --rssi-at-1m or --clear-rssi, not both")
+    if not any([clear_name, clear_rssi, name is not None, rssi_at_1m is not None, new_id]):
+        _abort("nothing to change: pass --name/--rssi-at-1m/--new-id or a --clear-* flag")
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    kwargs: dict = {}
+    if clear_name:
+        kwargs["name"] = None
+    elif name is not None:
+        kwargs["name"] = name
+    if clear_rssi:
+        kwargs["rssi_at_1m"] = None
+    elif rssi_at_1m is not None:
+        kwargs["rssi_at_1m"] = rssi_at_1m
+    try:
+        out = config_devices_core.update(parsed, device_id, new_id=new_id, **kwargs)
+    except config_devices_core.DeviceConfigError as exc:
+        _abort(str(exc))
+        return
+    if not out["found"]:
+        _abort(f"no device with id={device_id!r} in config.yaml")
+    out["dry_run"] = dry_run
+    if not dry_run and out["changed"]:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@devices.command("remove-from-config")
+@click.argument("device_id")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def devices_remove_from_config(ctx, device_id, restart, dry_run, config_file):
+    """Remove a device from the config.yaml `devices:` block.
+
+    This does not delete the companion's runtime record — use
+    `devices delete` for that.
+    """
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    out = config_devices_core.remove(parsed, device_id)
+    out["dry_run"] = dry_run
+    if not out["removed"]:
+        emit(ctx, out)
+        sys.exit(1)
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+# ──────────────────────────────────────────────────────── settings (tuning)
+
+
+@cli.group()
+def settings():
+    """Tuning knobs in config.yaml: timeouts, mqtt, gps, locators, optimizers.
+
+    Dotted paths address any key the running companion version understands,
+    so this keeps working across schema changes. Structural blocks
+    (floors/rooms/nodes/devices) are deliberately out of scope — they have
+    their own commands, which keep cross-references consistent.
+    """
+
+
+@settings.command("show")
+@click.option("--section", default=None, help="Only this top-level section, e.g. mqtt")
+@click.option("--reveal", is_flag=True, help="Do not redact passwords/tokens")
+@config_file_option
+@click.pass_context
+def settings_show(ctx, section, reveal, config_file):
+    """Show the behaviour half of config.yaml (secrets redacted by default)."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        emit(ctx, settings_core.summary(parsed, section=section, reveal=reveal))
+    except (KeyError, settings_core.SettingsError) as exc:
+        _abort(str(exc))
+
+
+@settings.command("get")
+@click.argument("path")
+@click.option("--reveal", is_flag=True, help="Do not redact a secret value")
+@config_file_option
+@click.pass_context
+def settings_get(ctx, path, reveal, config_file):
+    """Read one dotted path, e.g. settings get locators.nelder_mead.enabled."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = settings_core.get_path(parsed, path, reveal=reveal)
+    except settings_core.SettingsError as exc:
+        _abort(str(exc))
+        return
+    emit(ctx, out)
+    if not out["found"]:
+        sys.exit(1)
+
+
+@settings.command("set")
+@click.argument("path")
+@click.argument("value")
+@click.option(
+    "--type",
+    "value_type",
+    type=click.Choice(["auto", "str", "int", "float", "bool", "json"]),
+    default="auto",
+    help="How to read VALUE (default: auto-detect bool/null/number/JSON)",
+)
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def settings_set(ctx, path, value, value_type, restart, dry_run, config_file):
+    """Set one dotted path, creating parent mappings as needed.
+
+    Example:
+      settings set away_timeout 300
+      settings set locators.nelder_mead.enabled false
+    """
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = settings_core.set_path(parsed, path, value, kind=value_type)
+    except settings_core.SettingsError as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@settings.command("unset")
+@click.argument("path")
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def settings_unset(ctx, path, restart, dry_run, config_file):
+    """Delete one dotted path so the companion falls back to its default."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    try:
+        out = settings_core.unset_path(parsed, path)
+    except settings_core.SettingsError as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not out["removed"]:
+        emit(ctx, out)
+        sys.exit(1)
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+def _toggle_section(parsed, *candidates: str) -> str:
+    section = settings_core.resolve_section(parsed, *candidates)
+    if section is None:
+        _abort(f"config has no {' / '.join(candidates)} section")
+    return section  # type: ignore[return-value]
+
+
+def _toggle_list(ctx, parsed, *candidates: str) -> None:
+    emit(ctx, settings_core.list_toggles(parsed, _toggle_section(parsed, *candidates)))
+
+
+def _toggle_apply(ctx, source, parsed, state, name, restart, dry_run, *candidates: str) -> None:
+    """Shared `<thing> NAME on|off|status` body for locators and optimizers."""
+    section = _toggle_section(parsed, *candidates)
+    if state == "status":
+        for row in settings_core.list_toggles(parsed, section):
+            if row["name"] == name:
+                emit(ctx, row)
+                return
+        _abort(f"config has no {section}.{name}")
+        return
+    try:
+        out = settings_core.set_toggle(parsed, section, name, state == "on")
+    except KeyError as exc:
+        _abort(str(exc))
+        return
+    out["dry_run"] = dry_run
+    if not dry_run:
+        out["pushed"] = source.push(parsed, restart=restart)
+    emit(ctx, out)
+
+
+@settings.command("locators")
+@config_file_option
+@click.pass_context
+def settings_locators(ctx, config_file):
+    """List localisation algorithms and whether each is enabled."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    _toggle_list(ctx, parsed, "locators")
+
+
+@settings.command("locator")
+@click.argument("name")
+@click.argument("state", type=click.Choice(["on", "off", "status"]))
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def settings_locator(ctx, name, state, restart, dry_run, config_file):
+    """Turn one locator on/off, e.g. settings locator nelder_mead off."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    _toggle_apply(ctx, source, parsed, state, name, restart, dry_run, "locators")
+
+
+@settings.command("optimizers")
+@config_file_option
+@click.pass_context
+def settings_optimizers(ctx, config_file):
+    """List the auto-calibration optimizers declared in config.yaml."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    _toggle_list(ctx, parsed, "optimizers", "optimization")
+
+
+@settings.command("optimizer")
+@click.argument("name")
+@click.argument("state", type=click.Choice(["on", "off", "status"]))
+@click.option("--restart/--no-restart", default=False)
+@click.option("--dry-run", is_flag=True)
+@config_file_option
+@click.pass_context
+def settings_optimizer(ctx, name, state, restart, dry_run, config_file):
+    """Turn one optimizer on/off, e.g. settings optimizer absorption off."""
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
+    _toggle_apply(ctx, source, parsed, state, name, restart, dry_run, "optimizers", "optimization")
 
 
 # ──────────────────────────────────────────────────────── calibration

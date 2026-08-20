@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from cli_anything.espresense.core import geometry
+from cli_anything.espresense.core import config_devices, geometry, settings
 
 # Stable finding codes. Keep these strings frozen — callers match on them.
 DANGLING_ROOM_REF = "dangling_room_ref"
@@ -53,6 +53,12 @@ NODE_POINT_OUTSIDE_ROOM = "node_point_outside_room"
 NODE_POINT_OUTSIDE_BOUNDS = "node_point_outside_bounds"
 ROOM_OUTSIDE_FLOOR_BOUNDS = "room_outside_floor_bounds"
 ROOM_OVERLAP = "room_overlap"
+# `devices:` registry + tuning sections (added later; same stability guarantee).
+DUPLICATE_DEVICE_ID = "duplicate_device_id"
+DEVICE_MISSING_ID = "device_missing_id"
+BAD_DEVICE_RSSI = "bad_device_rssi"
+DEVICE_WITHOUT_NAME = "device_without_name"
+NO_LOCATOR_ENABLED = "no_locator_enabled"
 
 
 def _finding(level: str, code: str, message: str, **ctx) -> dict:
@@ -277,6 +283,93 @@ def _geometry_findings(parsed: Any) -> list[dict]:
     return findings
 
 
+def _device_findings(parsed: Any) -> list[dict]:
+    """Checks over the `devices:` registry.
+
+    Duplicate ids are an error for the same reason duplicate node names are:
+    the companion keys the block by `id`, so the second entry shadows the
+    first and which one wins depends on list order. A non-numeric `rssi@1m`
+    is an error too — it is parsed as a number, so the companion rejects the
+    document rather than ignoring one field.
+    """
+    findings: list[dict] = []
+    devices = parsed.get("devices") or []
+    if not isinstance(devices, list):
+        return [_finding("error", "not_a_mapping", "`devices:` must be a list of mappings")]
+    seen: dict[str, int] = {}
+    for i, entry in enumerate(devices):
+        if not isinstance(entry, dict):
+            findings.append(
+                _finding("error", DEVICE_MISSING_ID, f"devices[{i}] is not a mapping", index=i)
+            )
+            continue
+        did = entry.get("id")
+        label = did if did is not None else f"<devices[{i}]>"
+        if did is None or (isinstance(did, str) and not did.strip()):
+            findings.append(
+                _finding("error", DEVICE_MISSING_ID, f"devices[{i}] has no `id:`", index=i)
+            )
+        else:
+            seen[str(did)] = seen.get(str(did), 0) + 1
+        name = entry.get("name")
+        if name is None or (isinstance(name, str) and not name.strip()):
+            findings.append(
+                _finding(
+                    "warning",
+                    DEVICE_WITHOUT_NAME,
+                    f"device {label!r} has no `name:` — it will be reported by raw id",
+                    device=str(label),
+                )
+            )
+        for key in (config_devices.RSSI_KEY, "rssi_at_1m"):
+            if key in entry and entry[key] is not None and not _is_number(entry[key]):
+                findings.append(
+                    _finding(
+                        "error",
+                        BAD_DEVICE_RSSI,
+                        f"device {label!r} `{key}:` must be a number, got {entry[key]!r}",
+                        device=str(label),
+                    )
+                )
+    for did, count in seen.items():
+        if count > 1:
+            findings.append(
+                _finding(
+                    "error",
+                    DUPLICATE_DEVICE_ID,
+                    f"device id {did!r} is declared {count} times",
+                    device=did,
+                )
+            )
+    return findings
+
+
+def _locator_findings(parsed: Any) -> list[dict]:
+    """A `locators:` block with everything switched off localises nothing.
+
+    Only fires when the block exists: omitting it entirely means the
+    companion applies its own defaults, which is a normal config.
+    """
+    section = parsed.get("locators")
+    if not isinstance(section, dict) or not section:
+        return []
+    try:
+        rows = settings.list_toggles(parsed, "locators")
+    except settings.SettingsError:
+        return []
+    if rows and not any(row["enabled"] for row in rows):
+        return [
+            _finding(
+                "warning",
+                NO_LOCATOR_ENABLED,
+                "every locator in `locators:` is disabled — devices will never be "
+                "placed (`settings locator <name> on` re-enables one)",
+                locators=[row["name"] for row in rows],
+            )
+        ]
+    return []
+
+
 def check(parsed: Any) -> dict:
     """Validate a parsed config.yaml.
 
@@ -399,6 +492,8 @@ def check(parsed: Any) -> dict:
             )
 
     findings.extend(_geometry_findings(parsed))
+    findings.extend(_device_findings(parsed))
+    findings.extend(_locator_findings(parsed))
 
     errors = [f for f in findings if f["level"] == "error"]
     warnings = [f for f in findings if f["level"] == "warning"]

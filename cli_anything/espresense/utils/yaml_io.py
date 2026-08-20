@@ -11,6 +11,7 @@ from typing import Any
 
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedSeq
+from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
 
 def _yaml() -> YAML:
@@ -55,3 +56,16 @@ def flow_seq(items: Any) -> CommentedSeq:
     seq = CommentedSeq(items)
     seq.fa.set_flow_style()
     return seq
+
+
+def dq(value: Any) -> DoubleQuotedScalarString:
+    """A string that dumps double-quoted, e.g. `"rssi@1m"`, `"irk:abc123"`.
+
+    Same motivation as `flow_seq`: ruamel only preserves the quoting it
+    *parsed*, so a key or id the harness constructs comes out bare. Bare is
+    valid YAML here, but device ids carry colons (`irk:abc`) and the tracked
+    -device key carries an `@` — precisely the characters a reader (or a
+    stricter downstream parser) has to think twice about. Hand-authored
+    espresense configs quote them, so anything appended should too.
+    """
+    return DoubleQuotedScalarString(str(value))

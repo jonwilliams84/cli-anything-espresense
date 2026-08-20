@@ -1,6 +1,6 @@
 ---
 name: cli-anything-espresense
-description: CLI harness for the ESPresense ecosystem — read/edit/validate the companion's YAML config, rotate or rename rooms, add and reshape room polygons, manage floors and their bounds, place nodes by geometry, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry.
+description: CLI harness for the ESPresense ecosystem — read/edit/validate the companion's YAML config, rotate or rename rooms, add and reshape room polygons, manage floors and their bounds, place nodes by geometry, curate the tracked-device registry, tune timeouts/locators/optimizers by dotted path, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry.
 ---
 
 # cli-anything-espresense
@@ -24,6 +24,10 @@ per-node ESP32 web UI, and direct MQTT — behind a single Click CLI with full
   placing nodes at room centroids instead of hand-computed coordinates.
 - Renaming or rotating room labels — and fixing every node `room:`
   reference in the same operation.
+- Curating which beacons are tracked (`devices ...-config`) and what their
+  reference RSSI is, durably in `config.yaml` rather than in runtime state.
+- Tuning behaviour: timeouts, MQTT connection, GPS origin, which localisation
+  algorithm runs, which autocalibration optimizers run (`settings`).
 - Inspecting one ESP node's status, settings, or seen-devices list by IP.
 - Renaming the OTA hostname of a physical ESP node.
 - Streaming live device-position events from the companion.
@@ -55,7 +59,9 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `floors` | `floors list`, `floors show gf`, `floors add bs --name "Basement" --bounds "0,0,0 6,4,2.4"`, `floors rename bs "Cellar"`, `floors retag bs basement`, `floors set-bounds gf 0,0,0 10,8,2.4`, `floors fit-bounds gf --margin 0.25`, `floors delete bs --force` |
 | `nodes` | `nodes list`, `nodes show <id>`, `nodes add <name> --room "Office" --point 1,2,3`, `nodes place <name> --room "Office"`, `nodes remove-from-config <name>`, `nodes rename-in-config <old> <new>`, `nodes set-point <name> X Y Z`, `nodes restart <id>`, `nodes delete <id>`, `nodes update-firmware <id> <url>`, `nodes put-settings <id> '{"calibration":{"absorption":2.8}}'` |
 | `node` | `node info <ip>`, `node restart <ip>`, `node reboot <ip>`, `node settings <ip> --section extras`, `node set <ip> absorption=2.8`, `node rename <ip> <new-name>`, `node devices <ip>`, `node config-list <ip>`, `node config-set <ip> <device-id> --name X --rssi-at-1m -59`, `node config-delete <ip> <device-id>` |
-| `devices` | `devices list`, `devices show <id>`, `devices set <id> --name "Jon Phone" --ref-rssi -59` |
+| `devices` (runtime) | `devices list`, `devices show <id>`, `devices set <id> --name "Jon Phone" --ref-rssi -59`, `devices delete <id>` |
+| `devices` (config.yaml) | `devices list-in-config`, `devices show-in-config <id>`, `devices add-to-config 'irk:abc' --name "Jon Phone" --rssi-at-1m -65`, `devices update-in-config 'irk:abc' --rssi-at-1m -61`, `devices remove-from-config 'irk:abc'` |
+| `settings` | `settings show`, `settings show --section mqtt`, `settings get locators.nelder_mead.enabled`, `settings set away_timeout 300`, `settings unset weighting.algorithm`, `settings locators`, `settings locator nadaraya_watson off`, `settings optimizers`, `settings optimizer absorption off` |
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on` |
 | `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50` |
 | `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10` |
@@ -140,6 +146,12 @@ Codes (textual): `dangling_room_ref`, `room_ref_whitespace`,
 `node_missing_room`, `node_missing_name`, `bad_node_point`,
 `degenerate_polygon`, `room_without_node`, `no_floors`, `no_nodes`.
 
+Codes (devices/tuning): `duplicate_device_id`, `device_missing_id` and
+`bad_device_rssi` are errors; `device_without_name` and `no_locator_enabled`
+are warnings. `no_locator_enabled` means every entry in `locators:` is
+switched off, so nothing will ever be positioned — `settings locator <name>
+on` is the fix.
+
 Codes (geometric): `dangling_floor_ref` and `bad_floor_bounds` are errors;
 `node_point_outside_room`, `room_overlap`, `room_outside_floor_bounds` and
 `node_point_outside_bounds` are warnings. They are warnings on purpose —
@@ -165,7 +177,20 @@ those with `rooms repoint-node` first, or pass `--force` and accept that
 
 **Retiring a node takes two commands**: `nodes delete <id>` clears the
 companion's runtime settings/telemetry, `nodes remove-from-config <name>`
-removes the entry from `config.yaml`.
+removes the entry from `config.yaml`. Beacons work the same way: `devices
+delete <id>` is runtime, `devices remove-from-config <id>` is config.yaml.
+
+**`settings` is the schema-free half of `config.yaml`.** Address any tuning
+key by dotted path (`settings set locators.nelder_mead.enabled false`) — it
+works against whatever keys the running companion version has. Three rules
+worth knowing before calling it:
+
+  * secrets are **redacted** in `settings show` / `settings get` output; pass
+    `--reveal` only when the value is genuinely needed;
+  * values are auto-typed (`false` -> bool, `300` -> int, `[1,2]` -> list);
+    force with `--type str|int|float|bool|json`;
+  * structural paths (`nodes.*`, `rooms.*`, `floors.*`, `devices.*`) are
+    **refused** — use the dedicated commands, which repair cross-references.
 
 **Retiring a floor is guarded the same way as a room.** `floors delete` reports
 `rooms_removed`, `orphaned_nodes` and `nodes_referencing`, and refuses to write
@@ -268,6 +293,25 @@ A `dangling_room_ref` or `room_ref_whitespace` error explains it outright;
 `rooms repoint-node` or `rooms rename` is the fix. If doctor is clean, check
 the geometry: `rooms geometry` shows `nodes_outside` per room, and
 `rooms locate <x> <y>` says which polygon a coordinate really belongs to.
+
+### Track a new beacon and tune how it is located
+
+```bash
+cli-anything-espresense companion config-fetch -o cfg.yaml
+
+# 1. add it to the durable registry with a friendly name + reference RSSI
+cli-anything-espresense --json devices add-to-config 'irk:abc123' \
+  --name "Jon Phone" --rssi-at-1m -65 --file cfg.yaml
+
+# 2. check what is doing the locating, and switch algorithms if needed
+cli-anything-espresense --json settings locators --file cfg.yaml
+cli-anything-espresense --json settings locator nelder_mead on --file cfg.yaml
+cli-anything-espresense --json settings set away_timeout 300 --file cfg.yaml
+
+# 3. validate (catches duplicate ids, bad rssi@1m, all-locators-off) and ship
+cli-anything-espresense --json config doctor --file cfg.yaml
+cli-anything-espresense companion config-push cfg.yaml --restart
+```
 
 ### Recalibrate a single node remotely
 

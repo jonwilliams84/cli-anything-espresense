@@ -151,6 +151,38 @@ entry that referenced it — the floor-level twin of what `rooms rename` does fo
 `room:`. `floors delete` refuses to strand nodes unless you pass `--force`, and
 names them either way.
 
+### Tracked devices and tuning knobs
+
+The other half of config.yaml — *what we track* and *how we localise it* —
+is editable too, offline, with the same `--file`:
+
+```bash
+# the durable `devices:` registry (as opposed to the companion's runtime view)
+cli-anything-espresense devices list-in-config --file cfg.yaml
+cli-anything-espresense devices add-to-config 'irk:abc123' \
+  --name "Jon Phone" --rssi-at-1m -65 --file cfg.yaml
+cli-anything-espresense devices update-in-config 'irk:abc123' --rssi-at-1m -61 --file cfg.yaml
+cli-anything-espresense devices remove-from-config 'irk:abc123' --file cfg.yaml
+
+# timeouts, mqtt, gps, locators, optimizers — addressed by dotted path
+cli-anything-espresense settings show --file cfg.yaml          # secrets redacted
+cli-anything-espresense settings set away_timeout 300 --file cfg.yaml
+cli-anything-espresense settings set locators.nelder_mead.enabled false --file cfg.yaml
+cli-anything-espresense settings locators --file cfg.yaml
+cli-anything-espresense settings locator nadaraya_watson off --file cfg.yaml
+cli-anything-espresense settings optimizer absorption off --file cfg.yaml
+```
+
+`settings` is deliberately schema-free: dotted paths work against whatever
+keys the running companion version understands, instead of an option list that
+rots on the next release. It **redacts `mqtt.password` and friends** unless you
+pass `--reveal`, auto-types values (`false`, `300`, `[1,2]`; override with
+`--type`), and **refuses structural paths** like `settings set nodes.0.room` —
+those belong to the `nodes`/`rooms`/`floors`/`devices` commands, which keep
+cross-references consistent. `config doctor` grew matching checks: duplicate or
+missing device ids and non-numeric `rssi@1m` are errors, unnamed devices and
+"every locator disabled" are warnings.
+
 ## Quick examples
 
 ```bash
@@ -212,7 +244,9 @@ cli_anything/espresense/
 │   ├── rooms.py             # polygon rename / rotate / geometry (with node fix-up)
 │   ├── nodes.py             # node config edits, placement + live-state merge
 │   ├── node_direct.py       # per-ESP firmware HTTP client
-│   ├── devices.py           # tracked-device wrappers
+│   ├── devices.py           # tracked-device wrappers (companion runtime)
+│   ├── config_devices.py    # the `devices:` block of config.yaml
+│   ├── settings.py          # dotted-path tuning edits (timeouts, mqtt, locators)
 │   ├── calibration.py
 │   ├── history.py
 │   ├── stream.py            # /ws WebSocket consumer
@@ -236,12 +270,14 @@ the file on start, hence the `--restart` flag on every mutating command.
 python3 -m pytest cli_anything/espresense/tests/ -v
 ```
 
-932 tests, 93% coverage — all against synthetic data on disk, no live
+1227 tests, 94% coverage — all against synthetic data on disk, no live
 broker, cluster or companion required. They cover the YAML round-trip, room
 rename + rotate (including atomic cycles and trailing-whitespace handling),
 the polygon/bounds maths (including the cases where two rooms must *not* be
-called overlapping), the config validator, the per-node HTTP client, and full
-end-to-end CLI workflows driven through `--file` against a real config.yaml.
+called overlapping), the config validator, the device registry and tuning-path
+editors (coercion, secret redaction, structural-path refusal), the per-node
+HTTP client, and full end-to-end CLI workflows driven through `--file` against
+a real config.yaml.
 
 ## License
 

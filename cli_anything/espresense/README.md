@@ -111,8 +111,8 @@ cli-anything-espresense companion config-push ./config.yaml --restart
 
 Local writes leave a timestamped `.bak` beside the file, just like in-pod
 writes do. `--file` works on **every** config-reading or config-editing
-command: all of `rooms`, all of `floors`, the config-side `nodes` commands,
-and `config doctor`.
+command: all of `rooms`, all of `floors`, the config-side `nodes` and `devices`
+commands, all of `settings`, and `config doctor`.
 
 ### Validate the config
 
@@ -186,6 +186,57 @@ a floor that no longer exists. `floors fit-bounds` derives the floor box from
 the room polygons on it — run it after any `rooms add/move/scale`.
 `floors delete` refuses to strand nodes unless you pass `--force`.
 
+### Tracked devices in config.yaml
+
+The `devices` group now spans both halves of device management. `devices
+list / show / set / delete` talk to the companion's **runtime** store;
+the `-config` commands edit the **`devices:` block of config.yaml**, which
+is what survives a restart:
+
+```bash
+cli-anything-espresense devices list-in-config --file ./config.yaml
+cli-anything-espresense devices add-to-config 'irk:abc123' \
+  --name "Jon Phone" --rssi-at-1m -65 --file ./config.yaml
+cli-anything-espresense devices update-in-config 'irk:abc123' \
+  --rssi-at-1m -61 --file ./config.yaml
+cli-anything-espresense devices remove-from-config 'irk:abc123' --file ./config.yaml
+```
+
+Same split as nodes: `devices delete` drops the companion's runtime record,
+`devices remove-from-config` drops the config entry — retiring a beacon for
+good needs both. Reference RSSI is written as the companion's `rssi@1m:` key
+(the CLI spells it `--rssi-at-1m` because `@` is awkward in a shell), and
+`config doctor` now flags duplicate device ids, missing ids and non-numeric
+`rssi@1m` values as errors, unnamed devices as a warning.
+
+### Tune timeouts, MQTT, locators and optimizers
+
+Everything in config.yaml that is *not* a floor, room, node or device is
+reachable by dotted path, so it keeps working as companion releases add keys:
+
+```bash
+cli-anything-espresense settings show --file ./config.yaml         # secrets redacted
+cli-anything-espresense settings get mqtt.port --file ./config.yaml
+cli-anything-espresense settings set away_timeout 300 --file ./config.yaml
+cli-anything-espresense settings set locators.nelder_mead.enabled false --file ./config.yaml
+cli-anything-espresense settings unset weighting.algorithm --file ./config.yaml
+
+# localisation algorithms + autocalibration optimizers
+cli-anything-espresense settings locators --file ./config.yaml
+cli-anything-espresense settings locator nadaraya_watson off --file ./config.yaml
+cli-anything-espresense settings optimizers --file ./config.yaml
+cli-anything-espresense settings optimizer absorption off --file ./config.yaml
+```
+
+`settings show` and `settings get` **redact `mqtt.password` and anything else
+that looks like a secret** unless you pass `--reveal` — that output tends to
+end up in issues and agent transcripts. Values are auto-typed (`false` becomes
+a bool, `300` an int, `[1,2]` a list); override with `--type str|int|float|bool|json`.
+Structural blocks are deliberately refused: `settings set nodes.0.room X`
+errors and points you at the `nodes` commands, which keep cross-references
+consistent. Turning off every locator is caught by `config doctor` as
+`no_locator_enabled`.
+
 ### Per-device config on one ESP node
 
 ```bash
@@ -205,7 +256,9 @@ cli-anything-espresense node config-delete 10.32.101.32 apple:1005:9-12
 | `floors list / show / add / rename / retag / set-bounds / fit-bounds / delete` | Full floor CRUD in config.yaml |
 | `nodes list / show / add / place / remove-from-config / rename-in-config / set-point / restart / delete / update-firmware / put-settings` | Manage nodes from the companion side |
 | `node info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete` | Direct HTTP to one ESP node |
-| `devices list / show / set / delete` | Tracked devices (phones, tags, beacons) |
+| `devices list / show / set / delete` | Tracked devices, companion runtime view (phones, tags, beacons) |
+| `devices list-in-config / show-in-config / add-to-config / update-in-config / remove-from-config` | The durable `devices:` block of config.yaml |
+| `settings show / get / set / unset / locators / locator / optimizers / optimizer` | Tuning half of config.yaml: timeouts, mqtt, gps, locators, optimizers |
 | `calibration get / summary / reset / auto-optimize` | Calibration matrix + autocalibration |
 | `history get` | Per-device position history |
 | `mqtt set-node / set-device / pub / watch` | Raw MQTT pub/sub |
@@ -214,7 +267,8 @@ cli-anything-espresense node config-delete 10.32.101.32 apple:1005:9-12
 
 `nodes delete` clears the companion's runtime settings for a node;
 `nodes remove-from-config` removes it from `config.yaml`. Use both to fully
-retire a node.
+retire a node. `devices delete` vs `devices remove-from-config` is the same
+distinction for beacons.
 
 Pass `--json` for machine-readable output on every command.
 
@@ -233,7 +287,9 @@ cli_anything/espresense/
 │   ├── rooms.py             # polygon rename / rotate / geometry (with node fix-up)
 │   ├── nodes.py             # node config edits, placement + live-state merge
 │   ├── node_direct.py       # per-ESP HTTP client (firmware web server)
-│   ├── devices.py           # tracked-device wrappers
+│   ├── devices.py           # tracked-device wrappers (companion runtime)
+│   ├── config_devices.py    # the `devices:` block of config.yaml
+│   ├── settings.py          # dotted-path tuning edits (timeouts, mqtt, locators)
 │   ├── calibration.py
 │   ├── history.py
 │   ├── stream.py            # /ws WebSocket consumer
