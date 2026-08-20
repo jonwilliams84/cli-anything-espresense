@@ -380,3 +380,107 @@ def _by_code(report, code, level="errors"):
         if finding["code"] == code:
             return finding
     raise AssertionError(f"{code} not found in report")
+
+
+class TestDeviceRegistryFindings:
+    """`devices:` checks — the block `devices ...-config` commands write."""
+
+    def test_a_clean_registry_is_silent(self):
+        cfg = _cfg(devices=[{"id": "irk:aaa", "name": "Phone", "rssi@1m": -65}])
+        report = validate.check(cfg)
+        assert report["ok"] is True
+        assert report["warnings"] == []
+
+    def test_no_devices_block_is_not_a_finding(self):
+        assert validate.check(_cfg())["warnings"] == []
+
+    def test_duplicate_device_id_is_an_error(self):
+        cfg = _cfg(devices=[{"id": "dup", "name": "A"}, {"id": "dup", "name": "B"}])
+        report = validate.check(cfg)
+        assert validate.DUPLICATE_DEVICE_ID in codes(report)
+        assert report["ok"] is False
+
+    def test_duplicate_finding_names_the_id(self):
+        cfg = _cfg(devices=[{"id": "dup", "name": "A"}, {"id": "dup", "name": "B"}])
+        assert _by_code(validate.check(cfg), validate.DUPLICATE_DEVICE_ID)["device"] == "dup"
+
+    def test_missing_id_is_an_error(self):
+        cfg = _cfg(devices=[{"name": "Nameless"}])
+        assert validate.DEVICE_MISSING_ID in codes(validate.check(cfg))
+
+    def test_blank_id_is_an_error(self):
+        cfg = _cfg(devices=[{"id": "   ", "name": "A"}])
+        assert validate.DEVICE_MISSING_ID in codes(validate.check(cfg))
+
+    def test_a_non_mapping_entry_is_an_error(self):
+        cfg = _cfg(devices=["irk:aaa"])
+        assert validate.DEVICE_MISSING_ID in codes(validate.check(cfg))
+
+    def test_non_numeric_reference_rssi_is_an_error(self):
+        cfg = _cfg(devices=[{"id": "a", "name": "A", "rssi@1m": "loud"}])
+        assert validate.BAD_DEVICE_RSSI in codes(validate.check(cfg))
+
+    def test_boolean_reference_rssi_is_an_error(self):
+        cfg = _cfg(devices=[{"id": "a", "name": "A", "rssi@1m": True}])
+        assert validate.BAD_DEVICE_RSSI in codes(validate.check(cfg))
+
+    def test_the_underscored_alias_is_checked_too(self):
+        cfg = _cfg(devices=[{"id": "a", "name": "A", "rssi_at_1m": "loud"}])
+        assert validate.BAD_DEVICE_RSSI in codes(validate.check(cfg))
+
+    def test_null_reference_rssi_is_tolerated(self):
+        cfg = _cfg(devices=[{"id": "a", "name": "A", "rssi@1m": None}])
+        assert validate.BAD_DEVICE_RSSI not in codes(validate.check(cfg))
+
+    def test_unnamed_device_is_only_a_warning(self):
+        cfg = _cfg(devices=[{"id": "irk:aaa"}])
+        report = validate.check(cfg)
+        assert validate.DEVICE_WITHOUT_NAME in codes(report, "warnings")
+        assert report["ok"] is True
+
+    def test_devices_block_that_is_not_a_list_is_an_error(self):
+        report = validate.check(_cfg(devices={"id": "a"}))
+        assert report["ok"] is False
+
+    def test_device_checks_do_not_mutate_the_config(self):
+        import copy
+
+        cfg = _cfg(devices=[{"id": "a"}, {"id": "a", "rssi@1m": "loud"}])
+        snapshot = copy.deepcopy(cfg)
+        validate.check(cfg)
+        assert cfg == snapshot
+
+
+class TestLocatorFindings:
+    def test_all_locators_disabled_is_a_warning(self):
+        cfg = _cfg(
+            locators={"nadaraya_watson": {"enabled": False}, "nelder_mead": {"enabled": False}}
+        )
+        report = validate.check(cfg)
+        assert validate.NO_LOCATOR_ENABLED in codes(report, "warnings")
+        assert report["ok"] is True
+
+    def test_the_warning_lists_the_locators(self):
+        cfg = _cfg(locators={"nadaraya_watson": {"enabled": False}})
+        finding = _by_code(validate.check(cfg), validate.NO_LOCATOR_ENABLED)
+        assert finding["locators"] == ["nadaraya_watson"]
+
+    def test_one_enabled_locator_clears_it(self):
+        cfg = _cfg(locators={"a": {"enabled": False}, "b": {"enabled": True}})
+        assert validate.NO_LOCATOR_ENABLED not in codes(validate.check(cfg), "warnings")
+
+    def test_absent_enabled_key_counts_as_on(self):
+        cfg = _cfg(locators={"nearest_node": {"max_distance": 3}})
+        assert validate.NO_LOCATOR_ENABLED not in codes(validate.check(cfg), "warnings")
+
+    def test_no_locators_block_is_not_a_finding(self):
+        assert validate.NO_LOCATOR_ENABLED not in codes(validate.check(_cfg()), "warnings")
+
+    def test_empty_locators_block_is_not_a_finding(self):
+        assert validate.NO_LOCATOR_ENABLED not in codes(
+            validate.check(_cfg(locators={})), "warnings"
+        )
+
+    def test_a_malformed_locators_block_does_not_crash_the_checker(self):
+        report = validate.check(_cfg(locators="nadaraya_watson"))
+        assert isinstance(report["warnings"], list)
