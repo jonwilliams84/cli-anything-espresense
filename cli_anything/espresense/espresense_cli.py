@@ -16,6 +16,7 @@ from cli_anything.espresense.core import (
     devices as devices_core,
     floors as floors_core,
     geometry,
+    global_settings as global_settings_core,
     history as history_core,
     k8s_backend,
     mqtt as mqtt_core,
@@ -486,6 +487,82 @@ def companion_pod(ctx):
             "resolved": bool(name),
         },
     )
+
+
+# ── global settings ──────────────────────────────────────────────────────
+# Deployment-wide knobs that live OUTSIDE config.yaml (telemetry cadence,
+# expiration, GPS origin, include/exclude filters, ...). Served at
+# GET/POST /api/settings and mirrored on espresense/settings/<key>/set —
+# `mqtt set-global` is the broker-side twin of `companion settings-set`.
+
+
+@companion.command("settings-keys")
+@click.pass_context
+def companion_settings_keys(ctx):
+    """List the global settings the companion understands (key/kind/description).
+
+    These are the deployment-wide knobs *outside* config.yaml — the
+    `settings` group edits that file, not these. Unknown keys are still
+    accepted by `companion settings-set`; the companion owns the schema.
+    """
+    emit(ctx, global_settings_core.describe())
+
+
+@companion.command("settings-get")
+@click.option("--section", default=None, help="Only this key, e.g. expiration")
+@click.option("--reveal", is_flag=True, help="Do not redact secret values")
+@click.pass_context
+def companion_settings_get(ctx, section, reveal):
+    """Read the companion's global settings (GET /api/settings).
+
+    Secrets are redacted by default — this output routinely lands in
+    transcripts and issues.
+
+    Example:
+      companion settings-get --section expiration
+    """
+    client = make_client(ctx)
+    try:
+        emit(ctx, global_settings_core.fetch(client, key=section, reveal=reveal))
+    except CompanionError as exc:
+        _abort(str(exc))
+        return
+    except global_settings_core.GlobalSettingsError as exc:
+        _abort(str(exc))
+        return
+
+
+@companion.command("settings-set")
+@click.argument("key")
+@click.argument("value")
+@click.option(
+    "--type",
+    "value_type",
+    type=click.Choice(["auto", "str", "int", "float", "bool", "json"]),
+    default="auto",
+    help="How to read VALUE (default: the key's declared kind, else auto-detect)",
+)
+@click.pass_context
+def companion_settings_set(ctx, key, value, value_type):
+    """Set one global setting via POST /api/settings.
+
+    These live outside config.yaml, so there is no --file / --restart here —
+    the companion applies the value immediately and on restart.
+
+    Example:
+      companion settings-set expiration 300
+      companion settings-set gps '{"lat":51.5,"lng":-0.1,"elev":30}'
+    """
+    client = make_client(ctx)
+    try:
+        out = global_settings_core.update(client, key, value, kind=value_type)
+    except CompanionError as exc:
+        _abort(str(exc))
+        return
+    except global_settings_core.GlobalSettingsError as exc:
+        _abort(str(exc))
+        return
+    emit(ctx, out)
 
 
 # ──────────────────────────────────────────────────────── floors
@@ -1959,7 +2036,41 @@ def mqtt_set_device(ctx, device_id, config_json, retain, prefix):
     emit(ctx, out)
 
 
-@mqtt.command("watch")
+@mqtt.command("set-global")
+@click.argument("key")
+@click.argument("value")
+@click.option(
+    "--retain/--no-retain", default=True, help="Retain the message on the broker (default: yes)"
+)
+@click.option("--prefix", default=None, help="Topic prefix (default: espresense)")
+@click.pass_context
+def mqtt_set_global(ctx, key, value, retain, prefix):
+    """Publish a global setting: espresense/settings/<key>/set
+
+    The broker-side twin of `companion settings-set` — works when the
+    companion's REST API is unreachable, and the retained message is
+    re-applied at startup. Keys are shared with `companion settings-keys`.
+
+    Example:
+      mqtt set-global expiration 300
+      mqtt set-global telemetry true
+      mqtt set-global gps '{"lat":51.5,"lng":-0.1,"elev":30}'
+    """
+    kw = _mqtt_args(ctx)
+    try:
+        out = mqtt_core.publish_global_setting(
+            key=key,
+            value=value,
+            prefix=prefix or ctx.obj.get("mqtt_topic_prefix", "espresense"),
+            retain=retain,
+            **kw,
+        )
+    except mqtt_core.MqttError as exc:
+        _abort(str(exc))
+        return
+    emit(ctx, out)
+
+
 @click.argument("topic_filter")
 @click.option(
     "--duration", default=None, type=float, help="Seconds to listen (default: until Ctrl-C)"

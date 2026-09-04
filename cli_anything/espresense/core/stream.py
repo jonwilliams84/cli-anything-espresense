@@ -50,9 +50,14 @@ def stream(
     ws = websocket.create_connection(url, timeout=5)
     try:
         ws.settimeout(0.5)
+        deadline_checked = False
         while True:
-            if end and time.time() >= end:
+            # Always attempt at least one read, even with a tiny duration,
+            # so a slow first tick cannot discard events that are already
+            # queued on the socket.
+            if deadline_checked and end and time.time() >= end:
                 break
+            deadline_checked = True
             try:
                 raw = ws.recv()
             except websocket.WebSocketTimeoutException:

@@ -9,6 +9,7 @@ deployments using a non-standard prefix still work.
 
 Setting topics (publish → retained):
   espresense/rooms/<id>/<key>/set            ← per-node setting
+  espresense/settings/<key>/set              ← global setting
   espresense/settings/<device-id>/config     ← per-device fingerprint
 
 Telemetry topics (subscribe):
@@ -55,6 +56,17 @@ def _client(
     return c
 
 
+def _stringify(value) -> str:
+    """MQTT payloads are strings — bools become "true"/"false", containers JSON."""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return str(value)
+
+
 def publish_setting(
     host: str,
     node_id: str,
@@ -71,15 +83,43 @@ def publish_setting(
 
     `value` is stringified — bools become "true"/"false", others use str().
     """
-    if isinstance(value, bool):
-        payload = "true" if value else "false"
-    elif isinstance(value, (int, float)):
-        payload = str(value)
-    elif isinstance(value, (dict, list)):
-        payload = json.dumps(value)
-    else:
-        payload = str(value)
+    payload = _stringify(value)
     topic = f"{prefix}/rooms/{node_id}/{key}/set"
+    c = _client(host, port, username=username, password=password)
+    try:
+        c.loop_start()
+        info = c.publish(topic, payload, qos=0, retain=retain)
+        info.wait_for_publish(timeout=5)
+        return {"topic": topic, "payload": payload, "rc": info.rc}
+    finally:
+        c.loop_stop()
+        c.disconnect()
+
+
+def publish_global_setting(
+    host: str,
+    key: str,
+    value,
+    *,
+    port: int = 1883,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    prefix: str = "espresense",
+    retain: bool = True,
+) -> dict:
+    """Publish a global setting: espresense/settings/<key>/set.
+
+    The deployment-wide counterpart to `publish_setting` (per-node) and
+    `publish_device_config` (per-device). Retained by default so nodes and
+    the companion re-apply the value at startup.
+
+    `value` is stringified the same way as everywhere else in this module;
+    a JSON object such as the `gps` origin passes through as its JSON text.
+    """
+    if not str(key).strip() or "/" in str(key):
+        raise MqttError(f"setting key must be non-empty and contain no '/': {key!r}")
+    payload = _stringify(value)
+    topic = f"{prefix}/settings/{key}/set"
     c = _client(host, port, username=username, password=password)
     try:
         c.loop_start()
@@ -102,14 +142,7 @@ def publish_raw(
     retain: bool = False,
 ) -> dict:
     """Publish an arbitrary topic — useful for /settings/+/config writes."""
-    if isinstance(payload, (dict, list)):
-        payload_str = json.dumps(payload)
-    elif isinstance(payload, bool):
-        payload_str = "true" if payload else "false"
-    elif isinstance(payload, (int, float)):
-        payload_str = str(payload)
-    else:
-        payload_str = str(payload)
+    payload_str = _stringify(payload)
     c = _client(host, port, username=username, password=password)
     try:
         c.loop_start()

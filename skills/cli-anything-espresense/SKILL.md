@@ -1,6 +1,6 @@
 ---
 name: cli-anything-espresense
-description: CLI harness for the ESPresense ecosystem — read/edit/validate the companion's YAML config, rotate or rename rooms, add and reshape room polygons, manage floors and their bounds, place nodes by geometry, curate the tracked-device registry, tune timeouts/locators/optimizers by dotted path, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry.
+description: CLI harness for the ESPresense ecosystem — read/edit/validate the companion's YAML config, rotate or rename rooms, add and reshape room polygons, manage floors and their bounds, place nodes by geometry, curate the tracked-device registry, tune timeouts/locators/optimizers by dotted path, set deployment-wide global settings over REST or MQTT, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry.
 ---
 
 # cli-anything-espresense
@@ -28,6 +28,10 @@ per-node ESP32 web UI, and direct MQTT — behind a single Click CLI with full
   reference RSSI is, durably in `config.yaml` rather than in runtime state.
 - Tuning behaviour: timeouts, MQTT connection, GPS origin, which localisation
   algorithm runs, which autocalibration optimizers run (`settings`).
+- Reading or setting the companion's **global settings** — telemetry,
+  expiration, availability timeout, GPS origin, include/exclude filters —
+  which live outside config.yaml (`companion settings-keys/get/set`, or
+  `mqtt set-global` when the REST API is unreachable).
 - Inspecting one ESP node's status, settings, or seen-devices list by IP.
 - Renaming the OTA hostname of a physical ESP node.
 - Streaming live device-position events from the companion.
@@ -53,7 +57,7 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 
 | Group | Examples |
 |---|---|
-| `companion` | `companion info`, `companion config-get`, `companion config-fetch -o cfg.yaml`, `companion config-push cfg.yaml --restart`, `companion restart`, `companion stream --duration 30 --type deviceChanged`, `companion locator`, `companion firmware-types`, `companion pod` |
+| `companion` | `companion info`, `companion config-get`, `companion config-fetch -o cfg.yaml`, `companion config-push cfg.yaml --restart`, `companion restart`, `companion stream --duration 30 --type deviceChanged`, `companion locator`, `companion firmware-types`, `companion pod`, `companion settings-keys`, `companion settings-get --section expiration`, `companion settings-set expiration 300` |
 | `rooms` | `rooms list`, `rooms add gf "Study" --point 5,0 --point 9,0 --point 9,4`, `rooms delete "Study"`, `rooms rename "Spare" "Office" --restart`, `rooms rotate --map "A=B" --map "B=A" --restart`, `rooms repoint-node noah-bedroom "Noah Bedroom"` |
 | `rooms` (geometry) | `rooms geometry`, `rooms locate 5 1`, `rooms overlaps`, `rooms set-points Office --point 0,0 --point 5,0 --point 5,4 --point 0,4`, `rooms move Office 1 -2`, `rooms scale Office 1.1`, `rooms set-color Office '#a3c9f9'` |
 | `floors` | `floors list`, `floors show gf`, `floors add bs --name "Basement" --bounds "0,0,0 6,4,2.4"`, `floors rename bs "Cellar"`, `floors retag bs basement`, `floors set-bounds gf 0,0,0 10,8,2.4`, `floors fit-bounds gf --margin 0.25`, `floors delete bs --force` |
@@ -64,7 +68,7 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `settings` | `settings show`, `settings show --section mqtt`, `settings get locators.nelder_mead.enabled`, `settings set away_timeout 300`, `settings unset weighting.algorithm`, `settings locators`, `settings locator nadaraya_watson off`, `settings optimizers`, `settings optimizer absorption off` |
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on` |
 | `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50` |
-| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10` |
+| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300` |
 | `config` | `config show`, `config save`, `config doctor --file cfg.yaml` |
 | `repl` | Interactive shell (default with no subcommand) |
 
@@ -113,6 +117,19 @@ on the companion's deployment. Each write leaves a
 edits `config.yaml` accepts it and operates on a local YAML instead — no
 kubectl, no cluster. Prefer this shape when you can, because it lets you
 validate before anything reaches production:
+
+**Global settings are not config.yaml.** `telemetry`, `expiration`,
+`availability_timeout`, `gps`, `include`/`exclude` and friends live in the
+companion's own state — `settings set` will not reach them. Use
+`companion settings-get` (secrets redacted unless `--reveal`) and
+`companion settings-set`, or the retained MQTT twin `mqtt set-global` when
+the REST API is unreachable. Both coerce values identically, and known key
+spellings are listed by `companion settings-keys`:
+
+```bash
+cli-anything-espresense --json companion settings-set expiration 300
+cli-anything-espresense --json mqtt set-global telemetry true
+```
 
 ```bash
 cli-anything-espresense companion config-fetch -o cfg.yaml    # needs kubectl

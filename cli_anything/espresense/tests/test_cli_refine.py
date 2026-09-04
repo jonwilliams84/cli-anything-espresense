@@ -780,3 +780,197 @@ class TestHelpSurface:
         """The --file escape hatch must be uniform, or it is a trap."""
         res = CliRunner().invoke(cli, [*path, "--help"])
         assert "--file" in res.output, path
+
+
+def env_run(argv, *args, json_out=True):
+    """Run a command with an explicit --config argv (used where the profile
+    needs broker credentials the shared `env` fixture does not carry)."""
+    argv = list(argv)
+    if json_out:
+        argv.append("--json")
+    argv.extend(args)
+    return CliRunner().invoke(cli, argv)
+
+
+# ─────────────────────────────── companion global settings + mqtt set-global
+
+
+def _with_client(mock_gs, **fetch_return):
+    """Patch make_client + global_settings_core for one command run."""
+    return (
+        patch.object(cli_mod, "make_client", return_value=MagicMock()),
+        patch("cli_anything.espresense.espresense_cli.global_settings_core", mock_gs),
+    )
+
+
+class TestCompanionSettingsKeys:
+    def test_lists_known_keys_sorted(self, env):
+        data = payload(env("companion", "settings-keys"))
+        keys = [row["key"] for row in data]
+        assert keys == sorted(keys)
+        assert {"telemetry", "expiration", "gps"} <= set(keys)
+
+    def test_rows_carry_kind_and_description(self, env):
+        data = payload(env("companion", "settings-keys"))
+        row = next(r for r in data if r["key"] == "telemetry")
+        assert row["kind"] == "bool"
+        assert row["description"]
+
+    def test_human_readable_renders_a_table(self, env):
+        res = env("companion", "settings-keys", json_out=False)
+        assert res.exit_code == 0
+        assert "expiration" in res.output
+
+    def test_group_help_lists_all_three_commands(self, env):
+        res = env("companion", "--help", json_out=False)
+        assert res.exit_code == 0
+        for name in ("settings-keys", "settings-get", "settings-set"):
+            assert name in res.output
+
+
+class TestCompanionSettingsGet:
+    def test_reads_and_redacts(self, env):
+        mock_gs = MagicMock()
+        mock_gs.fetch.return_value = {
+            "source": "/api/settings",
+            "settings": {"telemetry": True, "token": "***"},
+        }
+        p1, p2 = _with_client(mock_gs)
+        with p1, p2:
+            data = payload(env("companion", "settings-get"))
+        assert data["settings"]["token"] == "***"
+        assert mock_gs.fetch.call_args[1] == {"key": None, "reveal": False}
+
+    def test_section_and_reveal_are_passed(self, env):
+        mock_gs = MagicMock()
+        mock_gs.fetch.return_value = {"key": "expiration", "value": 300, "secret": False}
+        p1, p2 = _with_client(mock_gs)
+        with p1, p2:
+            data = payload(env("companion", "settings-get", "--section", "expiration", "--reveal"))
+        assert data["value"] == 300
+        assert mock_gs.fetch.call_args[1] == {"key": "expiration", "reveal": True}
+
+    def test_unknown_key_exits_one(self, env):
+        """Real core path: the companion (faked here) holds no such key."""
+        fake_client = MagicMock()
+        fake_client.get.return_value = {"telemetry": True}
+        with patch.object(cli_mod, "make_client", return_value=fake_client):
+            res = env("companion", "settings-get", "--section", "nope")
+        assert res.exit_code == 1
+        assert "nope" in res.output
+        assert "settings-keys" in res.output
+
+    def test_transport_error_exits_one(self, env):
+        fake_client = MagicMock()
+        fake_client.get.side_effect = cli_mod.CompanionError("connection refused")
+        with patch.object(cli_mod, "make_client", return_value=fake_client):
+            res = env("companion", "settings-get")
+        assert res.exit_code == 1
+        assert "connection refused" in res.output
+
+
+class TestCompanionSettingsSet:
+    def test_posts_the_setting(self, env):
+        mock_gs = MagicMock()
+        mock_gs.update.return_value = {
+            "source": "/api/settings",
+            "key": "expiration",
+            "before": 600,
+            "after": 300,
+            "secret": False,
+            "changed": True,
+        }
+        p1, p2 = _with_client(mock_gs)
+        with p1, p2:
+            data = payload(env("companion", "settings-set", "expiration", "300"))
+        assert data["after"] == 300
+        assert data["changed"] is True
+        args, kwargs = mock_gs.update.call_args
+        assert args[1] == "expiration"
+        assert args[2] == "300"
+        assert kwargs == {"kind": "auto"}
+
+    def test_explicit_type_is_passed(self, env):
+        mock_gs = MagicMock()
+        mock_gs.update.return_value = {"key": "include", "after": "300", "secret": False}
+        p1, p2 = _with_client(mock_gs)
+        with p1, p2:
+            payload(env("companion", "settings-set", "include", "300", "--type", "str"))
+        assert mock_gs.update.call_args[1]["kind"] == "str"
+
+    def test_bad_value_exits_one(self, env):
+        """Real core: validation raises before the client is ever touched."""
+        with patch.object(cli_mod, "make_client", return_value=MagicMock()):
+            res = env("companion", "settings-set", "expiration", "soon")
+        assert res.exit_code == 1
+        assert "integer" in res.output
+
+    def test_transport_error_exits_one(self, env):
+        fake_client = MagicMock()
+        fake_client.get.side_effect = cli_mod.CompanionError("connection refused")
+        with patch.object(cli_mod, "make_client", return_value=fake_client):
+            res = env("companion", "settings-set", "expiration", "300")
+        assert res.exit_code == 1
+        assert "connection refused" in res.output
+
+
+class TestMqttSetGlobal:
+    def _profile(self, tmp_path, monkeypatch, body=None):
+        cfg_path = tmp_path / "profile.json"
+        cfg_path.write_text(json.dumps(body))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg_path)
+        return ["--config", str(cfg_path)]
+
+    def test_publishes_to_the_global_settings_topic(self, tmp_path, monkeypatch):
+        argv = self._profile(tmp_path, monkeypatch, {"mqtt_host": "broker.local"})
+        with patch.object(
+            cli_mod.mqtt_core,
+            "publish_global_setting",
+            return_value={
+                "topic": "espresense/settings/expiration/set",
+                "payload": "300",
+                "rc": 0,
+            },
+        ) as mock_pub:
+            data = payload(env_run(argv, "mqtt", "set-global", "expiration", "300"))
+        assert data["topic"] == "espresense/settings/expiration/set"
+        kwargs = mock_pub.call_args[1]
+        assert kwargs["host"] == "broker.local"
+        assert kwargs["key"] == "expiration"
+        assert kwargs["value"] == "300"
+        assert kwargs["retain"] is True
+        assert kwargs["prefix"] == "espresense"
+
+    def test_no_prefix_uses_default_and_retain_can_be_disabled(self, tmp_path, monkeypatch):
+        argv = self._profile(tmp_path, monkeypatch, {"mqtt_host": "broker.local"})
+        with patch.object(
+            cli_mod.mqtt_core,
+            "publish_global_setting",
+            return_value={"topic": "t", "payload": "1", "rc": 0},
+        ) as mock_pub:
+            payload(env_run(argv, "mqtt", "set-global", "telemetry", "true", "--no-retain"))
+        kwargs = mock_pub.call_args[1]
+        assert kwargs["prefix"] == "espresense"
+        assert kwargs["retain"] is False
+
+    def test_broker_error_exits_one(self, tmp_path, monkeypatch):
+        argv = self._profile(tmp_path, monkeypatch, {"mqtt_host": "broker.local"})
+        with patch.object(
+            cli_mod.mqtt_core,
+            "publish_global_setting",
+            side_effect=cli_mod.mqtt_core.MqttError("refused"),
+        ):
+            res = env_run(argv, "mqtt", "set-global", "telemetry", "true", json_out=False)
+        assert res.exit_code == 1
+        assert "refused" in res.output
+
+    def test_aborts_without_a_configured_broker(self, tmp_path, monkeypatch):
+        argv = self._profile(tmp_path, monkeypatch, {})
+        res = env_run(argv, "mqtt", "set-global", "telemetry", "true", json_out=False)
+        assert res.exit_code == 1
+        assert "no MQTT broker" in res.output
+
+    def test_help_shows_examples(self, env):
+        res = env("mqtt", "--help", json_out=False)
+        assert res.exit_code == 0
+        assert "set-global" in res.output

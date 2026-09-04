@@ -8,7 +8,14 @@ from __future__ import annotations
 
 import pytest
 
-from cli_anything.espresense.core import nodes as nodes_core
+from unittest.mock import MagicMock, patch
+
+from cli_anything.espresense.core import (
+    global_settings as global_settings_core,
+    mqtt as mqtt_core,
+    nodes as nodes_core,
+    settings as settings_core,
+)
 from cli_anything.espresense.core import rooms as rooms_core
 from cli_anything.espresense.utils import yaml_io
 
@@ -377,3 +384,190 @@ class TestB101Regression:
         expected = "Cook Room"
         if actual != expected:
             pytest.fail(f"Expected room name '{expected}', got '{actual}'")
+
+
+# ── global_settings ─────────────────────────────────────────────────────────
+# The companion's deployment-wide settings (GET/POST /api/settings), which
+# live outside config.yaml and are therefore reachable by no other module.
+
+
+class FakeCompanion:
+    """Records get/post calls against /api/settings like the real client."""
+
+    def __init__(self, state: dict):
+        self.state = state
+        self.posts: list[dict] = []
+
+    def get(self, path: str, params=None):
+        assert path == global_settings_core.SETTINGS_API_PATH
+        return dict(self.state)
+
+    def post(self, path: str, json=None, data=None):
+        assert path == global_settings_core.SETTINGS_API_PATH
+        self.posts.append(dict(json))
+        self.state.update(json)
+        return {"ok": True}
+
+
+class TestGlobalSettingsFetch:
+    def test_returns_full_mapping_redacted(self):
+        client = FakeCompanion({"telemetry": True, "expiration": 300, "mqtt_token": "s3cr3t"})
+        out = global_settings_core.fetch(client)
+        assert out["source"] == "/api/settings"
+        assert out["settings"]["telemetry"] is True
+        assert out["settings"]["mqtt_token"] == settings_core.REDACTED
+
+    def test_reveal_passes_values_through(self):
+        client = FakeCompanion({"mqtt_token": "s3cr3t"})
+        out = global_settings_core.fetch(client, reveal=True)
+        assert out["settings"]["mqtt_token"] == "s3cr3t"
+
+    def test_single_key_read(self):
+        client = FakeCompanion({"expiration": 300})
+        out = global_settings_core.fetch(client, key="expiration")
+        assert out == {"key": "expiration", "found": True, "value": 300, "secret": False}
+
+    def test_single_secret_key_is_masked(self):
+        client = FakeCompanion({"broker_password": "hunter2"})
+        out = global_settings_core.fetch(client, key="broker_password")
+        assert out["secret"] is True
+        assert out["value"] == settings_core.REDACTED
+
+    def test_single_secret_key_revealed(self):
+        client = FakeCompanion({"broker_password": "hunter2"})
+        out = global_settings_core.fetch(client, key="broker_password", reveal=True)
+        assert out["value"] == "hunter2"
+
+    def test_unknown_key_raises(self):
+        client = FakeCompanion({"expiration": 300})
+        with pytest.raises(global_settings_core.GlobalSettingsError, match="no_such_key"):
+            global_settings_core.fetch(client, key="no_such_key")
+
+    def test_error_names_settings_keys(self):
+        client = FakeCompanion({})
+        with pytest.raises(global_settings_core.GlobalSettingsError, match="settings-keys"):
+            global_settings_core.fetch(client, key="nope")
+
+
+class TestGlobalSettingsUpdate:
+    def test_declared_kind_is_applied_for_known_keys(self):
+        """expiration is declared int, so '300' must post as the number 300."""
+        client = FakeCompanion({"expiration": 600})
+        out = global_settings_core.update(client, "expiration", "300")
+        assert client.posts == [{"expiration": 300}]
+        assert out["after"] == 300
+        assert out["before"] == 600
+        assert out["changed"] is True
+
+    def test_bool_key_coerces(self):
+        client = FakeCompanion({"telemetry": True})
+        out = global_settings_core.update(client, "telemetry", "off")
+        assert client.posts == [{"telemetry": False}]
+        assert out["after"] is False
+
+    def test_json_key_parses_objects(self):
+        client = FakeCompanion({})
+        global_settings_core.update(client, "gps", '{"lat":51.5,"lng":-0.1}')
+        assert client.posts == [{"gps": {"lat": 51.5, "lng": -0.1}}]
+
+    def test_unknown_key_falls_back_to_auto(self):
+        client = FakeCompanion({})
+        global_settings_core.update(client, "brand_new_knob", "42")
+        assert client.posts == [{"brand_new_knob": 42}]
+
+    def test_explicit_kind_overrides_declared(self):
+        client = FakeCompanion({})
+        # 'on' is a legal channel label — force it to stay a string.
+        global_settings_core.update(client, "expiration", "on", kind="str")
+        assert client.posts == [{"expiration": "on"}]
+
+    def test_unchanged_value_reports_changed_false(self):
+        client = FakeCompanion({"expiration": 300})
+        out = global_settings_core.update(client, "expiration", "300")
+        assert out["changed"] is False
+
+    def test_secret_values_are_masked_in_summary(self):
+        client = FakeCompanion({"api_key": "abc"})
+        out = global_settings_core.update(client, "api_key", "xyz")
+        assert out["secret"] is True
+        assert out["before"] == settings_core.REDACTED
+        assert out["after"] == settings_core.REDACTED
+
+    def test_bad_value_raises(self):
+        client = FakeCompanion({})
+        with pytest.raises(global_settings_core.GlobalSettingsError, match="integer"):
+            global_settings_core.update(client, "expiration", "soon")
+
+    def test_empty_key_raises(self):
+        client = FakeCompanion({})
+        with pytest.raises(global_settings_core.GlobalSettingsError, match="non-empty"):
+            global_settings_core.update(client, "", "1")
+
+    def test_key_with_slash_raises(self):
+        client = FakeCompanion({})
+        with pytest.raises(global_settings_core.GlobalSettingsError, match="/"):
+            global_settings_core.update(client, "a/b", "1")
+
+
+class TestGlobalSettingsDescribe:
+    def test_lists_known_keys_sorted(self):
+        keys = [row["key"] for row in global_settings_core.describe()]
+        assert keys == sorted(keys)
+        assert {"telemetry", "expiration", "gps"} <= set(keys)
+
+    def test_rows_carry_kind_and_description(self):
+        row = next(r for r in global_settings_core.describe() if r["key"] == "gps")
+        assert row["kind"] == "json"
+        assert "GPS" in row["description"]
+
+
+class TestMqttPublishGlobalSetting:
+    """The broker-side twin — topic shape, payload stringification, guard."""
+
+    def _publish(self, value, key="expiration", retain=True, prefix="espresense"):
+        with patch("cli_anything.espresense.core.mqtt.mqtt") as mock_mqtt:
+            fake = MagicMock()
+            mock_mqtt.Client.return_value = fake
+            out = mqtt_core.publish_global_setting(
+                "broker.local", key, value, retain=retain, prefix=prefix
+            )
+        return out, fake, mock_mqtt
+
+    def test_topic_and_payload(self):
+        out, fake, _ = self._publish(300)
+        assert out["topic"] == "espresense/settings/expiration/set"
+        assert out["payload"] == "300"
+        fake.publish.assert_called_once_with(out["topic"], "300", qos=0, retain=True)
+
+    def test_json_value_passes_as_json_text(self):
+        out, _, _ = self._publish({"lat": 51.5}, key="gps")
+        assert out["payload"] == '{"lat": 51.5}'
+
+    def test_bool_value(self):
+        out, _, _ = self._publish(True, key="telemetry")
+        assert out["payload"] == "true"
+
+    def test_no_retain(self):
+        _, fake, _ = self._publish("1", retain=False)
+        assert fake.publish.call_args[1]["retain"] is False
+
+    def test_custom_prefix(self):
+        out, _, _ = self._publish("1", prefix="home")
+        assert out["topic"] == "home/settings/expiration/set"
+
+    def test_empty_key_rejected(self):
+        with pytest.raises(mqtt_core.MqttError, match="non-empty"):
+            mqtt_core.publish_global_setting("broker.local", "", "1")
+
+    def test_key_with_slash_rejected(self):
+        with pytest.raises(mqtt_core.MqttError, match="/"):
+            mqtt_core.publish_global_setting("broker.local", "a/b", "1")
+
+    def test_client_disconnected_even_on_publish_failure(self):
+        with patch("cli_anything.espresense.core.mqtt.mqtt") as mock_mqtt:
+            fake = MagicMock()
+            fake.publish.return_value.wait_for_publish.side_effect = RuntimeError("boom")
+            mock_mqtt.Client.return_value = fake
+            with pytest.raises(RuntimeError, match="boom"):
+                mqtt_core.publish_global_setting("broker.local", "expiration", "1")
+            fake.disconnect.assert_called_once()
