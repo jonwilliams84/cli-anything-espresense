@@ -44,7 +44,7 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 
 | Group | Purpose |
 |---|---|
-| `companion` | `api / info / config-get / config-fetch / config-push / restart / stream / locator / firmware-types / pod` — talk to the companion service |
+| `companion` | `api / info / config-get / config-fetch / config-push / restart / stream / locator / firmware-types / pod / settings-keys / settings-get / settings-set` — talk to the companion service |
 | `rooms` | `list / add / delete / rename / rotate / repoint-node / geometry / locate / overlaps / set-points / move / scale / set-color` — edit room polygons + node room references (atomic, supports cycles) and reason about their geometry |
 | `floors` | `list / show / add / rename / retag / set-bounds / fit-bounds / delete` — full floor CRUD in config.yaml |
 | `nodes` | `list / show / add / place / remove-from-config / rename-in-config / set-point / restart / delete / update-firmware / put-settings` — manage nodes from the companion side |
@@ -52,7 +52,7 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 | `devices` | `list / show / set / delete` — tracked devices (phones, tags, beacons) |
 | `calibration` | `get / summary / reset / auto-optimize` |
 | `history` | `get` — per-device position history |
-| `mqtt` | `set-node / set-device / pub / watch` — raw MQTT pub/sub |
+| `mqtt` | `set-node / set-device / set-global / pub / watch` — raw MQTT pub/sub |
 | `config` | `show / save` (local connection profile) + `doctor` (validate config.yaml) |
 | `repl` | Interactive shell (default with no subcommand) |
 
@@ -183,6 +183,39 @@ cross-references consistent. `config doctor` grew matching checks: duplicate or
 missing device ids and non-numeric `rssi@1m` are errors, unnamed devices and
 "every locator disabled" are warnings.
 
+### Global settings (outside config.yaml)
+
+Some knobs apply to the whole deployment rather than one node, room or
+device — telemetry cadence, device expiration, the GPS origin, include/exclude
+filters. Those are *not* in config.yaml; the companion keeps them in its own
+state and serves them at `GET/POST /api/settings`, mirrored on the retained
+MQTT topic `espresense/settings/<key>/set`:
+
+```bash
+# What's available, with the value kind each key wants
+cli-anything-espresense companion settings-keys
+
+# Read (secrets redacted unless --reveal)
+cli-anything-espresense companion settings-get
+cli-anything-espresense companion settings-get --section expiration
+
+# Set — applied immediately, no --restart needed, no --file (it's not config.yaml)
+cli-anything-espresense companion settings-set expiration 300
+cli-anything-espresense companion settings-set telemetry false
+cli-anything-espresense companion settings-set gps '{"lat":51.5,"lng":-0.1,"elev":30}'
+
+# Broker-side twin, for when the REST API is unreachable; retained, so the
+# companion re-applies the value at startup
+cli-anything-espresense mqtt set-global expiration 300
+cli-anything-espresense mqtt set-global telemetry true
+```
+
+Values are coerced the same way `settings set` coerces them (`false` → bool,
+`300` → int, JSON text → object); a known key's declared kind is used unless
+you override with `--type str|int|float|bool|json`. `settings-get` output is
+redacted by default. Unknown keys are still accepted — the companion owns the
+schema — but `companion settings-keys` lists the spellings that exist today.
+
 ## Quick examples
 
 ```bash
@@ -225,6 +258,9 @@ cli-anything-espresense mqtt set-node noah-bedroom absorption 2.8
 cli-anything-espresense mqtt set-device apple:1005:9-12 '{"name":"Jon Watch"}'
 cli-anything-espresense mqtt watch 'espresense/rooms/+/telemetry' --duration 10
 
+# Global settings via MQTT (retained; re-applied at startup)
+cli-anything-espresense mqtt set-global expiration 300
+
 # Live device-position stream
 cli-anything-espresense companion stream --duration 30 --type deviceChanged
 ```
@@ -251,6 +287,7 @@ cli_anything/espresense/
 │   ├── history.py
 │   ├── stream.py            # /ws WebSocket consumer
 │   ├── mqtt.py              # direct MQTT pub/sub
+│   ├── global_settings.py   # deployment-wide settings (/api/settings + MQTT)
 │   ├── k8s_backend.py       # kubectl exec helpers
 │   └── project.py           # local connection profile
 └── utils/
@@ -270,7 +307,7 @@ the file on start, hence the `--restart` flag on every mutating command.
 python3 -m pytest cli_anything/espresense/tests/ -v
 ```
 
-1227 tests, 94% coverage — all against synthetic data on disk, no live
+1271 tests, 94% coverage — all against synthetic data on disk, no live
 broker, cluster or companion required. They cover the YAML round-trip, room
 rename + rotate (including atomic cycles and trailing-whitespace handling),
 the polygon/bounds maths (including the cases where two rooms must *not* be

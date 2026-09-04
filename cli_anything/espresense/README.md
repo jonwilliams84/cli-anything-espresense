@@ -91,6 +91,20 @@ cli-anything-espresense mqtt set-device apple:1005:9-12 '{"name":"Jon Watch"}'
 cli-anything-espresense mqtt watch 'espresense/rooms/+/telemetry' --duration 10
 ```
 
+### Global settings (outside config.yaml)
+
+Deployment-wide knobs — telemetry cadence, expiration, GPS origin,
+include/exclude filters — are not in config.yaml at all. The companion serves
+them at `GET/POST /api/settings` and re-applies the retained MQTT topic
+`espresense/settings/<key>/set` at startup:
+
+```bash
+cli-anything-espresense companion settings-keys              # known keys + kinds
+cli-anything-espresense companion settings-get               # secrets redacted
+cli-anything-espresense companion settings-set expiration 300
+cli-anything-espresense mqtt set-global telemetry true       # broker-side twin
+```
+
 ### Live device-position stream
 
 ```bash
@@ -250,7 +264,7 @@ cli-anything-espresense node config-delete 10.32.101.32 apple:1005:9-12
 
 | Group | Purpose |
 |---|---|
-| `companion api / info / config-get / config-fetch / config-push / restart / stream / locator / firmware-types / pod` | Talk to the companion service |
+| `companion api / info / config-get / config-fetch / config-push / restart / stream / locator / firmware-types / pod / settings-keys / settings-get / settings-set` | Talk to the companion service |
 | `rooms list / add / delete / rename / rotate / repoint-node` | Edit room polygons + node room references |
 | `rooms geometry / locate / overlaps / set-points / move / scale / set-color` | Measure and reshape room polygons |
 | `floors list / show / add / rename / retag / set-bounds / fit-bounds / delete` | Full floor CRUD in config.yaml |
@@ -259,9 +273,10 @@ cli-anything-espresense node config-delete 10.32.101.32 apple:1005:9-12
 | `devices list / show / set / delete` | Tracked devices, companion runtime view (phones, tags, beacons) |
 | `devices list-in-config / show-in-config / add-to-config / update-in-config / remove-from-config` | The durable `devices:` block of config.yaml |
 | `settings show / get / set / unset / locators / locator / optimizers / optimizer` | Tuning half of config.yaml: timeouts, mqtt, gps, locators, optimizers |
+| `companion settings-keys / settings-get / settings-set` + `mqtt set-global` | Global settings *outside* config.yaml (`/api/settings`, mirrored on MQTT) |
 | `calibration get / summary / reset / auto-optimize` | Calibration matrix + autocalibration |
 | `history get` | Per-device position history |
-| `mqtt set-node / set-device / pub / watch` | Raw MQTT pub/sub |
+| `mqtt set-node / set-device / set-global / pub / watch` | Raw MQTT pub/sub |
 | `config show / save / doctor` | Local connection profile + config.yaml validation |
 | `repl` | Interactive shell (default if no subcommand) |
 
@@ -290,6 +305,7 @@ cli_anything/espresense/
 │   ├── devices.py           # tracked-device wrappers (companion runtime)
 │   ├── config_devices.py    # the `devices:` block of config.yaml
 │   ├── settings.py          # dotted-path tuning edits (timeouts, mqtt, locators)
+│   ├── global_settings.py   # deployment-wide settings: /api/settings + MQTT mirror
 │   ├── calibration.py
 │   ├── history.py
 │   ├── stream.py            # /ws WebSocket consumer
