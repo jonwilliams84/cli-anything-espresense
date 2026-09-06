@@ -15,6 +15,7 @@ from cli_anything.espresense.core import (
     mqtt as mqtt_core,
     nodes as nodes_core,
     settings as settings_core,
+    telemetry as telemetry_core,
 )
 from cli_anything.espresense.core import rooms as rooms_core
 from cli_anything.espresense.utils import yaml_io
@@ -571,3 +572,339 @@ class TestMqttPublishGlobalSetting:
             with pytest.raises(RuntimeError, match="boom"):
                 mqtt_core.publish_global_setting("broker.local", "expiration", "1")
             fake.disconnect.assert_called_once()
+
+
+# ════════════════════════════════════════════════════ telemetry (live queries)
+
+
+def _dist_rec(topic, payload, ts=1000.0):
+    return {"topic": topic, "payload": payload, "ts": ts}
+
+
+class TestParseDistancePayload:
+    """Nodes have shipped both a bare number and a JSON object as distance."""
+
+    def test_plain_float(self):
+        assert telemetry_core.parse_distance_payload("3.4") == 3.4
+
+    def test_plain_int_string(self):
+        assert telemetry_core.parse_distance_payload("3") == 3.0
+
+    def test_json_object_with_distance(self):
+        assert telemetry_core.parse_distance_payload('{"distance": 2.5, "rssi": -70}') == 2.5
+
+    def test_json_without_distance_key(self):
+        assert telemetry_core.parse_distance_payload('{"rssi": -70}') is None
+
+    def test_non_numeric_distance_key(self):
+        assert telemetry_core.parse_distance_payload('{"distance": "far"}') is None
+
+    def test_boolean_distance_is_not_a_number(self):
+        # bool is an int subclass in Python — must be rejected explicitly.
+        assert telemetry_core.parse_distance_payload('{"distance": true}') is None
+
+    def test_json_array_is_not_a_distance(self):
+        assert telemetry_core.parse_distance_payload("[1, 2]") is None
+
+    def test_garbage_is_none(self):
+        assert telemetry_core.parse_distance_payload("not a distance") is None
+
+    def test_empty_payload(self):
+        assert telemetry_core.parse_distance_payload("") is None
+        assert telemetry_core.parse_distance_payload(None) is None
+
+    def test_whitespace_is_tolerated(self):
+        assert telemetry_core.parse_distance_payload("  1.25 \n") == 1.25
+
+
+class TestTopicParsing:
+    def test_distance_topic_roundtrip(self):
+        assert telemetry_core._parse_distance_topic(
+            "espresense/rooms/kitchen/devices/apple:1", "espresense"
+        ) == ("kitchen", "apple:1")
+
+    def test_distance_topic_custom_prefix(self):
+        assert telemetry_core._parse_distance_topic("home/rooms/kitchen/devices/d1", "home") == (
+            "kitchen",
+            "d1",
+        )
+
+    def test_distance_topic_wrong_prefix_is_ignored(self):
+        assert telemetry_core._parse_distance_topic("other/rooms/a/devices/b", "espresense") is None
+
+    def test_distance_topic_wrong_depth_is_ignored(self):
+        assert (
+            telemetry_core._parse_distance_topic("espresense/rooms/a/devices/b/extra", "x") is None
+        )
+        assert telemetry_core._parse_distance_topic("espresense/rooms/a", "x") is None
+
+    def test_distance_topic_non_devices_branch_is_ignored(self):
+        assert (
+            telemetry_core._parse_distance_topic("espresense/rooms/kitchen/telemetry", "x") is None
+        )
+
+    def test_status_topic(self):
+        assert telemetry_core._parse_status_topic("espresense/rooms/kitchen/status", "x") is None
+        assert telemetry_core._parse_status_topic("x/rooms/kitchen/status", "x") == "kitchen"
+
+    def test_status_topic_wrong_shape(self):
+        assert telemetry_core._parse_status_topic("x/rooms/kitchen/telemetry", "x") is None
+        assert telemetry_core._parse_status_topic("x/rooms/kitchen/status/extra", "x") is None
+
+    def test_empty_topic_is_ignored(self):
+        assert telemetry_core._parse_distance_topic("", "espresense") is None
+        assert telemetry_core._parse_status_topic(None, "espresense") is None
+
+
+class TestAggregateDistances:
+    RECORDS = [
+        _dist_rec("espresense/rooms/kitchen/devices/d1", "3.0"),
+        _dist_rec("espresense/rooms/hall/devices/d1", "5.0", ts=101.0),
+        _dist_rec("espresense/rooms/hall/devices/d1", "4.0", ts=102.0),
+        _dist_rec("espresense/rooms/kitchen/devices/d2", '{"distance": 2.0}'),
+        _dist_rec("espresense/rooms/kitchen/devices/d2", "not-a-number"),
+        _dist_rec("other/rooms/kitchen/devices/d2", "9.9"),
+        _dist_rec("espresense/rooms/kitchen/telemetry", "{}"),
+    ]
+
+    def test_aggregates_per_device_and_node(self):
+        snap = telemetry_core.aggregate_distances(self.RECORDS)
+        d1 = snap["devices"]["d1"]
+        assert set(d1) == {"kitchen", "hall"}
+        assert d1["kitchen"] == {
+            "samples": 1,
+            "min": 3.0,
+            "max": 3.0,
+            "distance": 3.0,
+            "last_ts": 1000.0,
+        }
+        # hall saw two samples; the most recent (4.0) wins as `distance`
+        assert d1["hall"]["distance"] == 4.0
+        assert d1["hall"]["samples"] == 2
+        assert d1["hall"]["min"] == 4.0
+        assert d1["hall"]["max"] == 5.0
+
+    def test_message_count_counts_only_usable_records(self):
+        snap = telemetry_core.aggregate_distances(self.RECORDS)
+        # 3 usable distance records; garbage topics/payloads are not counted
+        assert snap["messages"] == 4
+
+    def test_device_filter(self):
+        snap = telemetry_core.aggregate_distances(self.RECORDS, device_id="d2")
+        assert set(snap["devices"]) == {"d2"}
+
+    def test_node_filter(self):
+        snap = telemetry_core.aggregate_distances(self.RECORDS, node_id="kitchen")
+        for dev in snap["devices"]:
+            assert set(snap["devices"][dev]) == {"kitchen"}
+
+    def test_custom_prefix(self):
+        recs = [_dist_rec("home/rooms/kitchen/devices/d1", "1.0")]
+        snap = telemetry_core.aggregate_distances(recs, prefix="home")
+        assert "d1" in snap["devices"]
+        assert "kitchen" in snap["devices"]["d1"]
+
+    def test_last_ts_is_recorded(self):
+        snap = telemetry_core.aggregate_distances(self.RECORDS)
+        assert snap["devices"]["d1"]["hall"]["last_ts"] == 102.0
+
+    def test_no_records_yields_empty(self):
+        assert telemetry_core.aggregate_distances([]) == {"devices": {}, "messages": 0}
+
+
+class TestNearest:
+    def test_sorted_by_distance(self):
+        devices = {
+            "d1": {
+                "hall": {"distance": 5.0, "samples": 1, "min": 5.0, "max": 5.0},
+                "kitchen": {"distance": 2.0, "samples": 3, "min": 1.5, "max": 2.2},
+            }
+        }
+        out = telemetry_core.nearest(devices)["d1"]
+        assert [r["node"] for r in out] == ["kitchen", "hall"]
+
+    def test_empty_device_has_empty_ranking(self):
+        assert telemetry_core.nearest({"d1": {}}) == {"d1": []}
+
+
+class TestDistanceRows:
+    def test_rows_flag_closest_node_and_are_sorted(self):
+        snap = telemetry_core.aggregate_distances(
+            [
+                _dist_rec("espresense/rooms/hall/devices/d1", "5.0"),
+                _dist_rec("espresense/rooms/kitchen/devices/d1", "2.0"),
+            ]
+        )
+        snap["nearest"] = telemetry_core.nearest(snap["devices"])
+        rows = telemetry_core.distance_rows(snap)
+        # sorted by distance within the device: kitchen (closest) first
+        assert rows[0]["node"] == "kitchen"
+        assert rows[0]["nearest"] is True
+        assert rows[1]["node"] == "hall"
+        assert rows[1]["nearest"] is False
+        assert all(r["device"] == "d1" for r in rows)
+
+    def test_derives_nearest_when_snapshot_lacks_it(self):
+        snap = telemetry_core.aggregate_distances(
+            [_dist_rec("espresense/rooms/hall/devices/d1", "5.0")]
+        )
+        rows = telemetry_core.distance_rows(snap)
+        assert rows[0]["nearest"] is True
+
+    def test_empty_snapshot_gives_no_rows(self):
+        assert telemetry_core.distance_rows({"devices": {}, "messages": 0}) == []
+
+
+class TestDistanceSnapshot:
+    def test_subscribes_and_aggregates(self):
+        records = [_dist_rec("espresense/rooms/kitchen/devices/d1", "3.0")]
+        with patch.object(mqtt_core, "watch", return_value=records) as mock_watch:
+            out = telemetry_core.distance_snapshot("broker.local", duration=2.5)
+        mock_watch.assert_called_once_with(
+            "broker.local",
+            "espresense/rooms/+/devices/+",
+            port=1883,
+            username=None,
+            password=None,
+            duration=2.5,
+        )
+        assert out["devices"]["d1"]["kitchen"]["distance"] == 3.0
+        assert out["topic_filter"] == "espresense/rooms/+/devices/+"
+        assert out["duration"] == 2.5
+        assert out["nearest"]["d1"][0]["node"] == "kitchen"
+
+    def test_filters_are_forwarded(self):
+        with patch.object(mqtt_core, "watch", return_value=[]) as mock_watch:
+            telemetry_core.distance_snapshot(
+                "broker.local", device_id="d1", node_id="kitchen", prefix="home"
+            )
+        assert mock_watch.call_args[0][1] == "home/rooms/+/devices/+"
+
+
+class TestAggregateStatus:
+    def test_online_and_offline_split(self):
+        records = [
+            {"topic": "espresense/rooms/kitchen/status", "payload": "online", "ts": 1},
+            {"topic": "espresense/rooms/hall/status", "payload": "offline", "ts": 1},
+            {"topic": "espresense/rooms/attic/status", "payload": "online", "ts": 1},
+        ]
+        out = telemetry_core.aggregate_status(records)
+        assert out == {"online": ["attic", "kitchen"], "offline": ["hall"]}
+
+    def test_unknown_payloads_ignored(self):
+        records = [
+            {"topic": "espresense/rooms/kitchen/status", "payload": "maybe?", "ts": 1},
+            {"topic": "espresense/rooms/hall/status", "payload": "", "ts": 1},
+        ]
+        assert telemetry_core.aggregate_status(records) == {"online": [], "offline": []}
+
+    def test_payload_is_case_insensitive(self):
+        records = [{"topic": "x/rooms/k/status", "payload": "ONLINE"}]
+        assert telemetry_core.aggregate_status(records, prefix="x")["online"] == ["k"]
+
+    def test_wrong_topics_ignored(self):
+        records = [{"topic": "espresense/rooms/k/telemetry", "payload": "online"}]
+        assert telemetry_core.aggregate_status(records)["online"] == []
+
+
+class TestStatusSnapshot:
+    def test_subscribes_to_status_topic(self):
+        records = [{"topic": "espresense/rooms/k/status", "payload": "online"}]
+        with patch.object(mqtt_core, "watch", return_value=records) as mock_watch:
+            out = telemetry_core.status_snapshot("broker.local", duration=1.5)
+        assert mock_watch.call_args[0][1] == "espresense/rooms/+/status"
+        assert out["online"] == ["k"]
+        assert out["duration"] == 1.5
+        assert out["topic_filter"] == "espresense/rooms/+/status"
+
+
+class TestOccupancy:
+    ROWS = [
+        {"id": "d1", "name": "Phone", "room": "Office", "floor": "Ground"},
+        {"id": "d2", "name": "Watch", "room": "Office", "floor": "Ground"},
+        {"id": "d3", "name": "Keys", "room": " Kitchen ", "floor": "Ground"},
+        {"id": "d4", "name": "Tag", "room": None, "floor": "Ground"},
+        {"id": "d5", "name": "Laptop", "room": "Attic", "floor": "Second"},
+    ]
+
+    def test_groups_by_room_sorted(self):
+        out = telemetry_core.occupancy(self.ROWS)
+        assert list(out["rooms"]) == ["Attic", "Kitchen", "Office"]
+        assert out["rooms"]["Office"] == [
+            {"id": "d1", "name": "Phone"},
+            {"id": "d2", "name": "Watch"},
+        ]
+        # room names are whitespace-stripped
+        assert out["rooms"]["Kitchen"] == [{"id": "d3", "name": "Keys"}]
+        assert out["unplaced"] == [{"id": "d4", "name": "Tag"}]
+
+    def test_floor_filter_is_case_insensitive(self):
+        out = telemetry_core.occupancy(self.ROWS, floor="ground")
+        assert set(out["rooms"]) == {"Office", "Kitchen"}
+        assert out["unplaced"] == [{"id": "d4", "name": "Tag"}]
+
+    def test_floor_filter_by_other_floor(self):
+        out = telemetry_core.occupancy(self.ROWS, floor="Second")
+        assert out["rooms"] == {"Attic": [{"id": "d5", "name": "Laptop"}]}
+        assert out["unplaced"] == []
+
+    def test_no_rows(self):
+        assert telemetry_core.occupancy([]) == {"rooms": {}, "unplaced": []}
+
+
+class FakeHistoryClient:
+    """Mimics the companion's /api/history/<id> responses."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.paths: list[str] = []
+
+    def get(self, path, params=None):
+        self.paths.append(path)
+        return {"history": self.rows}
+
+
+class TestWhereis:
+    ROW = {
+        "x": 1.5,
+        "y": 2.0,
+        "z": 0.9,
+        "roomName": "Office",
+        "floorName": "Ground",
+        "unixTs": 1760000000,
+    }
+
+    def test_returns_last_row_reduced(self):
+        client = FakeHistoryClient([dict(self.ROW, roomName="Kitchen", unixTs=1), self.ROW])
+        out = telemetry_core.whereis(client, "d1")
+        assert out == {
+            "device_id": "d1",
+            "found": True,
+            "room": "Office",
+            "floor": "Ground",
+            "x": 1.5,
+            "y": 2.0,
+            "z": 0.9,
+            "when": 1760000000,
+        }
+        assert client.paths == ["/api/history/d1"]
+
+    def test_alternate_row_spellings(self):
+        row = {"x": 0.0, "y": 0.0, "z": 0.0, "room": "Hall", "floor": "G", "ts": 42}
+        out = telemetry_core.whereis(FakeHistoryClient([row]), "d1")
+        assert out["room"] == "Hall"
+        assert out["when"] == 42
+
+    def test_never_seen_reports_found_false(self):
+        out = telemetry_core.whereis(FakeHistoryClient([]), "d1")
+        assert out == {"device_id": "d1", "found": False}
+
+    def test_empty_device_id_raises(self):
+        with pytest.raises(telemetry_core.TelemetryError, match="non-empty"):
+            telemetry_core.whereis(FakeHistoryClient([]), "  ")
+
+    def test_device_id_is_stripped(self):
+        client = FakeHistoryClient([])
+        out = telemetry_core.whereis(client, " d1 ")
+        assert out["device_id"] == "d1"
+        assert client.paths == ["/api/history/d1"]

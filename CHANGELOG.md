@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.3.0 — live presence queries
+
+The harness could configure an ESPresense deployment end to end but could
+barely *query* it: the everyday operational questions of a presence system
+were only reachable by hand-rolling `mqtt watch` and scraping raw history
+rows. v0.3.0 makes them first-class commands (all `--json`-capable):
+
+- `devices whereis DEVICE_ID` — last known position of one tracked device
+  (room, floor, coordinates, when) from the companion's history API; exits 1
+  with `{"found": false}` when the device has never been seen, so it gates a
+  script the way `rooms locate` does.
+- `devices occupancy [--floor F] [--show-all]` — which tracked devices are
+  currently in which room, grouped from the companion's live device list,
+  with unplaceable devices surfaced separately.
+- `mqtt distances [--device ID] [--node ID] [--duration S]` — subscribes to
+  `<prefix>/rooms/+/devices/+` for a bounded window and aggregates it: per
+  device and node, the most recent distance plus min/max/sample count, with
+  the closest node flagged. The readable counterpart to `mqtt watch`.
+- `mqtt node-status [--duration S]` — which nodes report online/offline on
+  the retained `<prefix>/rooms/<node>/status` topic.
+
+Core:
+
+- new `core/telemetry.py`: `whereis`, `distance_snapshot` /
+  `aggregate_distances` / `nearest` / `distance_rows`,
+  `status_snapshot` / `aggregate_status`, `occupancy`, and
+  `parse_distance_payload` (accepts both the bare-number and
+  `{"distance": ...}` payload shapes nodes have shipped). All aggregation
+  is pure over collected records, so it is unit-testable without a broker;
+  only the `mqtt.watch` calls touch the network.
+
+Also fixed in passing: `mqtt watch` was documented everywhere but its
+`@mqtt.command("watch")` registration had been lost, making the documented
+command unreachable — restored (and now pinned by a workflow test).
+
 ## v0.2.0 — global settings, both transports
 
 The companion's deployment-wide settings were the last major surface the

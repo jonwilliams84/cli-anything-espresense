@@ -111,6 +111,34 @@ cli-anything-espresense mqtt set-global telemetry true       # broker-side twin
 cli-anything-espresense companion stream --duration 30 --type deviceChanged
 ```
 
+### Live presence queries
+
+A presence system's everyday questions, as first-class commands instead of
+raw firehoses and history rows:
+
+```bash
+# where is this device right now? (room, floor, coordinates, when)
+cli-anything-espresense devices whereis apple:1005:9-12
+
+# who is in which room right now? (grouped read of the device list)
+cli-anything-espresense devices occupancy
+cli-anything-espresense devices occupancy --floor first
+
+# which nodes see which devices, at what distance? (aggregated MQTT snapshot)
+cli-anything-espresense mqtt distances --duration 10
+cli-anything-espresense mqtt distances --device apple:1005:9-12 --duration 5
+
+# which nodes are online? (retained <prefix>/rooms/<node>/status)
+cli-anything-espresense mqtt node-status
+```
+
+`mqtt distances` subscribes to `<prefix>/rooms/+/devices/+` for the window and
+aggregates: per device and node, the most recent distance plus min/max/sample
+count, with the closest node flagged — the readable counterpart to `mqtt
+watch`, which stays available for the raw feed. `devices whereis` exits 1 when
+the device has never been seen (but still emits `{"found": false}` JSON), so it
+can gate a script like `rooms locate` does.
+
 ### Backup, edit offline, validate, push
 
 Every config-reading/editing command takes `--file`, so the whole edit loop
@@ -271,12 +299,14 @@ cli-anything-espresense node config-delete 10.32.101.32 apple:1005:9-12
 | `nodes list / show / add / place / remove-from-config / rename-in-config / set-point / restart / delete / update-firmware / put-settings` | Manage nodes from the companion side |
 | `node info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete` | Direct HTTP to one ESP node |
 | `devices list / show / set / delete` | Tracked devices, companion runtime view (phones, tags, beacons) |
+| `devices whereis / occupancy` | Live presence queries: last known position of one device; who is in which room right now |
 | `devices list-in-config / show-in-config / add-to-config / update-in-config / remove-from-config` | The durable `devices:` block of config.yaml |
 | `settings show / get / set / unset / locators / locator / optimizers / optimizer` | Tuning half of config.yaml: timeouts, mqtt, gps, locators, optimizers |
 | `companion settings-keys / settings-get / settings-set` + `mqtt set-global` | Global settings *outside* config.yaml (`/api/settings`, mirrored on MQTT) |
 | `calibration get / summary / reset / auto-optimize` | Calibration matrix + autocalibration |
 | `history get` | Per-device position history |
 | `mqtt set-node / set-device / set-global / pub / watch` | Raw MQTT pub/sub |
+| `mqtt distances / node-status` | Aggregated live snapshots: node→device distances, node online/offline status |
 | `config show / save / doctor` | Local connection profile + config.yaml validation |
 | `repl` | Interactive shell (default if no subcommand) |
 
@@ -306,6 +336,7 @@ cli_anything/espresense/
 │   ├── config_devices.py    # the `devices:` block of config.yaml
 │   ├── settings.py          # dotted-path tuning edits (timeouts, mqtt, locators)
 │   ├── global_settings.py   # deployment-wide settings: /api/settings + MQTT mirror
+│   ├── telemetry.py         # live presence queries: whereis, distance/status snapshots, occupancy
 │   ├── calibration.py
 │   ├── history.py
 │   ├── stream.py            # /ws WebSocket consumer

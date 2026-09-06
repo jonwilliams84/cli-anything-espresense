@@ -1,6 +1,6 @@
 ---
 name: cli-anything-espresense
-description: CLI harness for the ESPresense ecosystem — read/edit/validate the companion's YAML config, rotate or rename rooms, add and reshape room polygons, manage floors and their bounds, place nodes by geometry, curate the tracked-device registry, tune timeouts/locators/optimizers by dotted path, set deployment-wide global settings over REST or MQTT, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry.
+description: CLI harness for the ESPresense ecosystem — read/edit/validate the companion's YAML config, rotate or rename rooms, add and reshape room polygons, manage floors and their bounds, place nodes by geometry, curate the tracked-device registry, tune timeouts/locators/optimizers by dotted path, set deployment-wide global settings over REST or MQTT, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry, and query live presence (last-known position, node-to-device distances, node status, room occupancy).
 ---
 
 # cli-anything-espresense
@@ -35,6 +35,10 @@ per-node ESP32 web UI, and direct MQTT — behind a single Click CLI with full
 - Inspecting one ESP node's status, settings, or seen-devices list by IP.
 - Renaming the OTA hostname of a physical ESP node.
 - Streaming live device-position events from the companion.
+- Answering presence questions without a firehose: where a device was last
+  seen (`devices whereis`), who is in which room right now
+  (`devices occupancy`), which nodes hear a device and at what distance
+  (`mqtt distances`), and which nodes are online (`mqtt node-status`).
 - Pushing per-node BLE settings (absorption, tx_ref_rssi, …) over MQTT.
 
 ## Install
@@ -63,12 +67,12 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `floors` | `floors list`, `floors show gf`, `floors add bs --name "Basement" --bounds "0,0,0 6,4,2.4"`, `floors rename bs "Cellar"`, `floors retag bs basement`, `floors set-bounds gf 0,0,0 10,8,2.4`, `floors fit-bounds gf --margin 0.25`, `floors delete bs --force` |
 | `nodes` | `nodes list`, `nodes show <id>`, `nodes add <name> --room "Office" --point 1,2,3`, `nodes place <name> --room "Office"`, `nodes remove-from-config <name>`, `nodes rename-in-config <old> <new>`, `nodes set-point <name> X Y Z`, `nodes restart <id>`, `nodes delete <id>`, `nodes update-firmware <id> <url>`, `nodes put-settings <id> '{"calibration":{"absorption":2.8}}'` |
 | `node` | `node info <ip>`, `node restart <ip>`, `node reboot <ip>`, `node settings <ip> --section extras`, `node set <ip> absorption=2.8`, `node rename <ip> <new-name>`, `node devices <ip>`, `node config-list <ip>`, `node config-set <ip> <device-id> --name X --rssi-at-1m -59`, `node config-delete <ip> <device-id>` |
-| `devices` (runtime) | `devices list`, `devices show <id>`, `devices set <id> --name "Jon Phone" --ref-rssi -59`, `devices delete <id>` |
+| `devices` (runtime) | `devices list`, `devices show <id>`, `devices set <id> --name "Jon Phone" --ref-rssi -59`, `devices delete <id>`, `devices whereis <id>` (last known position), `devices occupancy [--floor <floor>]` (who is in which room) |
 | `devices` (config.yaml) | `devices list-in-config`, `devices show-in-config <id>`, `devices add-to-config 'irk:abc' --name "Jon Phone" --rssi-at-1m -65`, `devices update-in-config 'irk:abc' --rssi-at-1m -61`, `devices remove-from-config 'irk:abc'` |
 | `settings` | `settings show`, `settings show --section mqtt`, `settings get locators.nelder_mead.enabled`, `settings set away_timeout 300`, `settings unset weighting.algorithm`, `settings locators`, `settings locator nadaraya_watson off`, `settings optimizers`, `settings optimizer absorption off` |
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on` |
 | `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50` |
-| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300` |
+| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt node-status` (online/offline) |
 | `config` | `config show`, `config save`, `config doctor --file cfg.yaml` |
 | `repl` | Interactive shell (default with no subcommand) |
 
@@ -221,6 +225,16 @@ while any of them are non-empty unless `--force` is passed.
 coordinate: `place` puts the node at the room's centroid, which is guaranteed
 to satisfy `node_point_outside_room`. Use `rooms locate X Y` first if you do
 have coordinates and want to confirm which room they land in.
+
+**Presence queries are read-only and safe to script.** `devices whereis`
+exits 1 (still emitting `{"found": false}` JSON) when the device has never
+been seen, so it can gate a workflow exactly like `rooms locate` does.
+`mqtt distances` and `mqtt node-status` listen on the broker for a bounded
+window (`--duration` seconds) and return aggregated JSON — `distances` marks
+the closest node per device, so "which room is the phone really nearest" is
+`mqtt distances --device <id> --json` and read `nearest[0]`. Use the raw
+`mqtt watch 'espresense/rooms/+/devices/+'` only when you need every individual
+message; the snapshot is its aggregated view.
 
 ## Typical workflows
 

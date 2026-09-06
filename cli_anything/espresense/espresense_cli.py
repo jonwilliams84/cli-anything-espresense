@@ -26,6 +26,7 @@ from cli_anything.espresense.core import (
     rooms as rooms_core,
     settings as settings_core,
     stream as stream_core,
+    telemetry as telemetry_core,
     validate as validate_core,
 )
 from cli_anything.espresense.core import companion_api
@@ -1512,6 +1513,42 @@ def devices():
     the durable `devices:` registry in config.yaml (`...-config` commands)."""
 
 
+@devices.command("whereis")
+@click.argument("device_id")
+@click.pass_context
+def devices_whereis(ctx, device_id):
+    """Last known position of one tracked device (room, floor, coordinates, when).
+
+    Reads the companion's /api/history/<id> — the same data `history get`
+    returns, reduced to the most recent point. Exits 1 when the device has
+    never been seen.
+    """
+    client = make_client(ctx)
+    try:
+        out = telemetry_core.whereis(client, device_id)
+    except telemetry_core.TelemetryError as exc:
+        _abort(str(exc))
+        return
+    emit(ctx, out)
+    if not out.get("found"):
+        sys.exit(1)
+
+
+@devices.command("occupancy")
+@click.option("--floor", default=None, help="Only devices on this floor (id or name)")
+@click.option("--show-all", is_flag=True, help="Include untracked devices too")
+@click.pass_context
+def devices_occupancy(ctx, floor, show_all):
+    """Which tracked devices are currently in which room (companion live view).
+
+    A grouped read of `devices list` — rooms with their occupants, plus the
+    devices the companion cannot place yet.
+    """
+    client = make_client(ctx)
+    rows = devices_core.list_devices(client, show_all=show_all)
+    emit(ctx, telemetry_core.occupancy(rows, floor=floor))
+
+
 @devices.command("list")
 @click.option("--show-all", is_flag=True, help="Include untracked devices too")
 @click.pass_context
@@ -2071,6 +2108,7 @@ def mqtt_set_global(ctx, key, value, retain, prefix):
     emit(ctx, out)
 
 
+@mqtt.command("watch")
 @click.argument("topic_filter")
 @click.option(
     "--duration", default=None, type=float, help="Seconds to listen (default: until Ctrl-C)"
@@ -2091,6 +2129,62 @@ def mqtt_watch(ctx, topic_filter, duration):
         click.echo(f"{topic}\t{payload}")
 
     mqtt_core.watch(topic_filter=topic_filter, duration=duration, callback=_print, **kw)
+
+
+@mqtt.command("distances")
+@click.option("--device", "device_id", default=None, help="Only this device id")
+@click.option("--node", "node_id", default=None, help="Only this node id")
+@click.option("--duration", default=10.0, type=float, help="Seconds to listen (default: 10)")
+@click.option("--prefix", default=None, help="Topic prefix (default: espresense)")
+@click.pass_context
+def mqtt_distances(ctx, device_id, node_id, duration, prefix):
+    """Snapshot which nodes see which devices, at what distance.
+
+    Subscribes to <prefix>/rooms/+/devices/+ for --duration seconds and
+    aggregates the raw distance messages: per device and node, the most
+    recent distance plus min/max/sample count over the window, with the
+    closest node flagged. `mqtt watch` gives you the firehose; this gives
+    the table.
+
+    Example:
+      mqtt distances --device apple:1005:9-12 --duration 5
+    """
+    kw = _mqtt_args(ctx)
+    out = telemetry_core.distance_snapshot(
+        duration=duration,
+        prefix=prefix or ctx.obj.get("mqtt_topic_prefix", "espresense"),
+        device_id=device_id,
+        node_id=node_id,
+        **kw,
+    )
+    if ctx.obj.get("as_json"):
+        emit(ctx, out)
+        return
+    emit(ctx, telemetry_core.distance_rows(out))
+
+
+@mqtt.command("node-status")
+@click.option("--duration", default=5.0, type=float, help="Seconds to listen (default: 5)")
+@click.option("--prefix", default=None, help="Topic prefix (default: espresense)")
+@click.pass_context
+def mqtt_node_status(ctx, duration, prefix):
+    """Which nodes report online/offline on <prefix>/rooms/+/status.
+
+    Nodes retain their status message, so even a short listen reports every
+    node that has published since its last boot — not just currently
+    chatty ones.
+    """
+    kw = _mqtt_args(ctx)
+    out = telemetry_core.status_snapshot(
+        duration=duration,
+        prefix=prefix or ctx.obj.get("mqtt_topic_prefix", "espresense"),
+        **kw,
+    )
+    if ctx.obj.get("as_json"):
+        emit(ctx, out)
+        return
+    click.echo(f"online:  {', '.join(out['online']) or '-'}")
+    click.echo(f"offline: {', '.join(out['offline']) or '-'}")
 
 
 # ──────────────────────────────────────────────────────── REPL

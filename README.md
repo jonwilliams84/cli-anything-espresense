@@ -49,10 +49,10 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 | `floors` | `list / show / add / rename / retag / set-bounds / fit-bounds / delete` — full floor CRUD in config.yaml |
 | `nodes` | `list / show / add / place / remove-from-config / rename-in-config / set-point / restart / delete / update-firmware / put-settings` — manage nodes from the companion side |
 | `node` | `info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete` — direct HTTP to one ESP firmware node |
-| `devices` | `list / show / set / delete` — tracked devices (phones, tags, beacons) |
+| `devices` | `list / show / set / delete / whereis / occupancy` — tracked devices (phones, tags, beacons), incl. last-known position and live room occupancy |
 | `calibration` | `get / summary / reset / auto-optimize` |
 | `history` | `get` — per-device position history |
-| `mqtt` | `set-node / set-device / set-global / pub / watch` — raw MQTT pub/sub |
+| `mqtt` | `set-node / set-device / set-global / pub / watch / distances / node-status` — raw MQTT pub/sub plus aggregated live snapshots (node→device distances, node online/offline) |
 | `config` | `show / save` (local connection profile) + `doctor` (validate config.yaml) |
 | `repl` | Interactive shell (default with no subcommand) |
 

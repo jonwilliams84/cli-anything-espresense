@@ -11,7 +11,7 @@ ruff check cli_anything/ && ruff format --check cli_anything/
 bandit -r cli_anything/ -ll -x '*/tests/*,*/test_*.py,*/conftest.py'
 ```
 
-Current state (v0.2.0): **1271 tests, 94% coverage, all four gates green.**
+Current state (v0.3.0): **1337 tests, all four gates green.**
 
 ## What is covered where
 
@@ -25,6 +25,7 @@ Current state (v0.2.0): **1271 tests, 94% coverage, all four gates green.**
 | Per-node firmware HTTP client | `test_mqtt_stream_nodes.py` | `test_cli.py` |
 | MQTT pub/sub payload handling | `test_mqtt.py`, `test_mqtt_stream_nodes.py` | `test_cli.py` |
 | **Global settings (`/api/settings` + MQTT mirror)** | `test_core.py` (`TestGlobalSettings*`, `TestMqttPublishGlobalSetting`) | `test_cli_refine.py` (`TestCompanionSettings*`, `TestMqttSetGlobal`) |
+| **Live presence queries (`devices whereis/occupancy`, `mqtt distances/node-status`)** | `test_core.py` (`TestParseDistancePayload`, `TestTopicParsing`, `TestAggregateDistances`, `TestNearest`, `TestDistanceRows`, `TestDistanceSnapshot`, `TestAggregateStatus`, `TestStatusSnapshot`, `TestOccupancy`, `TestWhereis`) | `test_full_e2e.py` (`TestDevicesWhereisE2E`, `TestDevicesOccupancyE2E`, `TestMqttDistancesE2E`, `TestMqttNodeStatusE2E`, `TestPresenceWorkflow`) |
 | Docs stay in sync with the CLI | `test_docs_sync.py` | — |
 
 Conventions the tests pin (see CLAUDE.md "Gotchas"): the `--file` option is
