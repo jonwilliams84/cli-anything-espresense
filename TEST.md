@@ -4,14 +4,14 @@ The suite runs against synthetic data on disk — no live companion, cluster,
 broker or node is ever contacted.
 
 ```bash
-python3 -m pytest cli_anything/espresense/tests/ -v          # 1419 tests
+python3 -m pytest cli_anything/espresense/tests/ -v          # 1468 tests
 python3 -m pytest cli_anything/espresense/tests/ \
   --cov=cli_anything --cov-fail-under=90 -q                  # CI gate shape
 ruff check cli_anything/ && ruff format --check cli_anything/
 bandit -r cli_anything/ -ll -x '*/tests/*,*/test_*.py,*/conftest.py'
 ```
 
-Current state (v0.3.1): **1419 tests, all four gates green (coverage 98.35%).**
+Current state: **1468 tests, all four gates green (coverage 98.75%).**
 
 ## What is covered where
 
@@ -28,6 +28,7 @@ Current state (v0.3.1): **1419 tests, all four gates green (coverage 98.35%).**
 | **Live presence queries (`devices whereis/occupancy`, `mqtt distances/node-status`)** | `test_core.py` (`TestParseDistancePayload`, `TestTopicParsing`, `TestAggregateDistances`, `TestNearest`, `TestDistanceRows`, `TestDistanceSnapshot`, `TestAggregateStatus`, `TestStatusSnapshot`, `TestOccupancy`, `TestWhereis`) | `test_full_e2e.py` (`TestDevicesWhereisE2E`, `TestDevicesOccupancyE2E`, `TestMqttDistancesE2E`, `TestMqttNodeStatusE2E`, `TestPresenceWorkflow`) |
 | Docs stay in sync with the CLI | `test_docs_sync.py` | — |
 | REPL loop, prompt-toolkit skin, stream/watch edge cases, direct-node group, remaining CLI error/no-op branches | `test_refine_hardening.py` | — |
+| CLI error-path contract (`_abort`: stderr + exit 1, no traceback) and last core gaps (calibration wrappers, `FileSource` backup failure, kubectl-missing, node-direct HTTP errors, rotate validation, transport wrapping, `python -m` entry) | `test_error_paths.py` | — |
 
 Conventions the tests pin (see CLAUDE.md "Gotchas"): the `--file` option is
 uniform across config commands, signed coordinates parse everywhere, secret

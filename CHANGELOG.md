@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.5.0] — 2026-09-06
+
+- Updated `claude.md`, `test.md`. (2 files changed, 5 insertions(+), 4 deletions(-))
+
 ## [0.4.0] — 2026-09-06
 
 - Updated `claude.md`, `test.md`. (2 files changed, 5 insertions(+), 4 deletions(-))
