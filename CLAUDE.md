@@ -9,14 +9,14 @@ Python Click CLI + REPL for operating an ESPresense deployment from the terminal
   - `espresense_cli.py` — Click CLI + REPL (all command groups)
   - `core/` — one module per concern: `companion_api.py`, `config_source.py`, `config_yaml.py`, `validate.py`, `geometry.py`, `floors.py`, `rooms.py`, `nodes.py`, `node_direct.py`, `devices.py`, `config_devices.py`, `settings.py`, `global_settings.py`, `calibration.py`, `history.py`, `telemetry.py`, `stream.py`, `mqtt.py`, `k8s_backend.py`, `project.py`
   - `utils/` — `companion_client.py` (requests Session), `yaml_io.py` (ruamel round-trip), `repl_skin.py`
-  - `tests/` — 1468 tests, synthetic data, no live services
+  - `tests/` — 1484 tests, synthetic data, no live services
 - `setup.py` reads `cli_anything/espresense/README.md` (NOT the repo-root README) as long_description — keep that file present.
 - Skill manifest is duplicated at `skills/cli-anything-espresense/SKILL.md` and `cli_anything/espresense/skills/SKILL.md`.
 
 ## Commands
 ```bash
 pip install -e .                                          # install
-python3 -m pytest cli_anything/espresense/tests/ -v       # test (1468 tests)
+python3 -m pytest cli_anything/espresense/tests/ -v       # test (1484 tests)
 ruff check cli_anything/ && ruff format --check cli_anything/   # lint gate
 bandit -r cli_anything/ -ll -x '*/tests/*,*/test_*.py'    # security gate
 cli-anything-espresense --help                            # CLI help
@@ -46,6 +46,7 @@ Every command supports `--json`.
 - config.yaml has two halves and both are now covered: *structural* (`floors`/`rooms`/`nodes`/`devices:`) and *behavioural* (`timeout`, `mqtt`, `gps`, `locators`, `optimizers`, ...). `core/settings.py` owns the second one and is deliberately schema-free — dotted paths, not one Click option per key, because companion releases rename tuning keys and an option list would rot. It REFUSES paths into the structural blocks (`settings set nodes.0.room`) and names the command to use instead; bypassing `rooms.py`/`nodes.py` would skip the cross-reference repair that is the whole point of those modules.
 - `settings show`/`settings get` redact `mqtt.password` and anything matching `settings.SECRET_HINTS` unless `--reveal`. That output routinely lands in issues and agent transcripts, so redaction is the default and opting out is explicit.
 - `core/telemetry.py` is the *query* half of the harness (v0.3.0): where a device was last seen (`devices whereis`, exits 1 with `found: false` when never seen — same gating shape as `rooms locate`), who is in which room (`devices occupancy`), which nodes hear which devices at what distance (`mqtt distances`, aggregated over `<prefix>/rooms/+/devices/+`), and which nodes are online (`mqtt node-status`, retained `<prefix>/rooms/<node>/status`). All aggregation is pure over collected `mqtt.watch` records; `parse_distance_payload` accepts both the bare-number and `{"distance": ...}` payload shapes nodes have shipped, and drops anything else rather than corrupting a snapshot.
+- `core/history.py` gained the pure `trail(rows)` fold (v0.6.0): `history trail DEVICE_ID` turns the raw `/api/history/<id>` rows into consecutive room segments (one per visit, not one per room), first/last-seen timestamps and the ordered `rooms_visited`. It accepts the same alternate row spellings as `telemetry.whereis` (`roomName`/`room`, `unixTs`/`ts`/`timestamp`); rows without a room stay as `room: None` segments so point counts stay honest but don't count as visits. Unlike `whereis`, `trail` exits 0 on an empty history — it summarises whatever rows exist.
 - `core/config_devices.py` (config.yaml `devices:`) vs `core/devices.py` (companion runtime `/api/device/*`) is the same split as `nodes remove-from-config` vs `nodes delete` — retiring a beacon needs both. The on-disk reference-RSSI key is `rssi@1m`; `RSSI_KEY` is the one place that spelling is written, the CLI spells it `--rssi-at-1m`, and reads also accept the `rssi_at_1m` variant seen in the wild.
 - New keys/ids the harness writes go through `yaml_io.dq()` (double-quoted) for the same reason coordinate lists go through `flow_seq()`: hand-authored configs quote `"rssi@1m"` and `"irk:abc"`, and bare `@`/`:` scalars are the ones a reader or a stricter parser has to think twice about.
 - `validate.check` gained `duplicate_device_id`/`device_missing_id`/`bad_device_rssi` (errors), `device_without_name`/`no_locator_enabled` (warnings). `counts` deliberately still reports only floors/rooms/nodes/errors/warnings — tests assert that dict by equality, and it is a documented stable surface.

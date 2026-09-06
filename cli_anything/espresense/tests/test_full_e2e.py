@@ -349,3 +349,132 @@ class TestPresenceWorkflow:
         assert where.exit_code == 0 and occ.exit_code == 0
         room = json.loads(where.output)["room"]
         assert room in json.loads(occ.output)["rooms"]
+
+
+# ── history trail ────────────────────────────────────────────────────────────
+
+
+class TestHistoryTrailE2E:
+    ROWS = [
+        {"x": 1.0, "y": 1.0, "roomName": "Kitchen", "unixTs": 1},
+        {"x": 1.2, "y": 1.1, "roomName": "Kitchen", "unixTs": 2},
+        {"x": 2.5, "y": 3.0, "roomName": "Office", "unixTs": 7},
+    ]
+
+    def _client(self):
+        client = MagicMock()
+        client.get.return_value = {"history": self.ROWS}
+        return client
+
+    def test_json_movement_summary(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.espresense_cli.make_client",
+            return_value=self._client(),
+        ):
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "history", "trail", "d1"]
+            )
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["device_id"] == "d1"
+        assert out["points"] == 3
+        assert out["first_seen"] == 1
+        assert out["last_seen"] == 7
+        assert out["rooms_visited"] == ["Kitchen", "Office"]
+        assert out["segments"] == [
+            {"room": "Kitchen", "points": 2, "first_seen": 1, "last_seen": 2},
+            {"room": "Office", "points": 1, "first_seen": 7, "last_seen": 7},
+        ]
+
+    def test_human_output_is_summary_plus_segment_table(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.espresense_cli.make_client",
+            return_value=self._client(),
+        ):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "history", "trail", "d1"])
+        assert result.exit_code == 0
+        assert "Kitchen, Office" in result.output
+        assert "Kitchen" in result.output and "Office" in result.output
+
+    def test_limit_is_applied_before_folding(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.espresense_cli.make_client",
+            return_value=self._client(),
+        ):
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "history", "trail", "d1", "--limit", "1"]
+            )
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["points"] == 1
+        assert out["rooms_visited"] == ["Office"]
+
+    def test_never_seen_still_emits_empty_summary(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        client = MagicMock()
+        client.get.return_value = {"history": []}
+        with patch("cli_anything.espresense.espresense_cli.make_client", return_value=client):
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "history", "trail", "ghost"]
+            )
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["points"] == 0
+        assert out["segments"] == []
+
+    def test_help(self):
+        result = CliRunner().invoke(cli, ["history", "trail", "--help"])
+        assert result.exit_code == 0
+        assert "Summarise where a device has been" in result.output
+
+
+class TestHistoryWorkflow:
+    """`history get` is the firehose; `history trail` is its readable fold —
+    the two must agree on the same transport call."""
+
+    def test_trail_segments_are_consistent_with_raw_rows(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        client = MagicMock()
+        client.get.return_value = {
+            "history": [
+                {"roomName": "Kitchen", "unixTs": 1},
+                {"roomName": "Office", "unixTs": 2},
+                {"roomName": "Office", "unixTs": 3},
+                {"roomName": "Kitchen", "unixTs": 4},
+            ]
+        }
+        with patch("cli_anything.espresense.espresense_cli.make_client", return_value=client):
+            raw = CliRunner().invoke(cli, ["--config", str(cfg), "--json", "history", "get", "d1"])
+            trail = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "history", "trail", "d1"]
+            )
+        assert raw.exit_code == 0 and trail.exit_code == 0
+        rows = json.loads(raw.output)
+        out = json.loads(trail.output)
+        # both commands hit the same endpoint with the same device
+        assert all(call.args[0] == "/api/history/d1" for call in client.get.call_args_list)
+        assert out["points"] == len(rows)
+        # folding the raw rows by hand must give the same segments
+        segments = []
+        for row in rows:
+            if not segments or segments[-1]["room"] != row["roomName"]:
+                segments.append(
+                    {
+                        "room": row["roomName"],
+                        "points": 1,
+                        "first_seen": row["unixTs"],
+                        "last_seen": row["unixTs"],
+                    }
+                )
+            else:
+                segments[-1]["points"] += 1
+                segments[-1]["last_seen"] = row["unixTs"]
+        assert out["segments"] == segments

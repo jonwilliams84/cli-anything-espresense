@@ -1978,6 +1978,41 @@ def history_get(ctx, device_id, start, end, limit):
     emit(ctx, rows)
 
 
+@history.command("trail")
+@click.argument("device_id")
+@click.option("--start", default=None, help="UTC start (ISO-8601), optional")
+@click.option("--end", default=None, help="UTC end (ISO-8601), optional")
+@click.option("--limit", default=None, type=int, help="Fold only the last N points")
+@click.pass_context
+def history_trail(ctx, device_id, start, end, limit):
+    """Summarise where a device has been, not just where it is.
+
+    Folds the raw history rows (`history get` is the firehose) into
+    consecutive room segments: one per visit, with first/last-seen timestamps
+    and a point count each, plus the overall first/last seen and the list of
+    rooms visited in order. `devices whereis` answers "where is it now?";
+    this answers "where has it been?".
+
+    Example:
+      history trail apple:1005:9-12 --limit 200
+    """
+    client = make_client(ctx)
+    rows = history_core.get_history(client, device_id, start=start, end=end)
+    if limit:
+        rows = rows[-limit:]
+    out = history_core.trail(rows)
+    out = {"device_id": device_id, **out}
+    if ctx.obj.get("as_json"):
+        emit(ctx, out)
+        return
+    click.echo(f"device:  {device_id}")
+    click.echo(f"points:  {out['points']}")
+    click.echo(f"first_seen: {out['first_seen'] if out['first_seen'] is not None else '-'}")
+    click.echo(f"last_seen:  {out['last_seen'] if out['last_seen'] is not None else '-'}")
+    click.echo(f"rooms:  {', '.join(str(r) for r in out['rooms_visited']) or '-'}")
+    emit(ctx, out["segments"])
+
+
 # ──────────────────────────────────────────────────────── mqtt
 
 

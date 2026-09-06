@@ -5,7 +5,7 @@ with open("cli_anything/espresense/README.md") as f:
 
 setup(
     name="cli-anything-espresense",
-    version="0.5.0",
+    version="0.6.0",
     description="CLI harness for ESPresense — companion + per-node firmware control from the command line",
     long_description=long_description,
     long_description_content_type="text/markdown",
