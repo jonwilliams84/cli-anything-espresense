@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from cli_anything.espresense.core import (
     global_settings as global_settings_core,
+    history as history_core,
     mqtt as mqtt_core,
     nodes as nodes_core,
     settings as settings_core,
@@ -908,3 +909,97 @@ class TestWhereis:
         out = telemetry_core.whereis(client, " d1 ")
         assert out["device_id"] == "d1"
         assert client.paths == ["/api/history/d1"]
+
+
+class TestHistoryTrail:
+    """Pure movement-summary aggregation behind `history trail`."""
+
+    def test_empty_rows(self):
+        assert history_core.trail([]) == {
+            "points": 0,
+            "first_seen": None,
+            "last_seen": None,
+            "rooms_visited": [],
+            "segments": [],
+        }
+
+    def test_single_room_is_one_segment(self):
+        rows = [
+            {"roomName": "Office", "unixTs": 1},
+            {"roomName": "Office", "unixTs": 2},
+            {"roomName": "Office", "unixTs": 3},
+        ]
+        out = history_core.trail(rows)
+        assert out["points"] == 3
+        assert out["first_seen"] == 1
+        assert out["last_seen"] == 3
+        assert out["rooms_visited"] == ["Office"]
+        assert out["segments"] == [{"room": "Office", "points": 3, "first_seen": 1, "last_seen": 3}]
+
+    def test_room_change_starts_new_segment(self):
+        rows = [
+            {"roomName": "Kitchen", "unixTs": 1},
+            {"roomName": "Kitchen", "unixTs": 2},
+            {"roomName": "Office", "unixTs": 5},
+        ]
+        out = history_core.trail(rows)
+        assert out["segments"] == [
+            {"room": "Kitchen", "points": 2, "first_seen": 1, "last_seen": 2},
+            {"room": "Office", "points": 1, "first_seen": 5, "last_seen": 5},
+        ]
+        assert out["rooms_visited"] == ["Kitchen", "Office"]
+
+    def test_revisit_gets_its_own_segment_but_room_listed_once(self):
+        rows = [
+            {"roomName": "Kitchen", "unixTs": 1},
+            {"roomName": "Office", "unixTs": 2},
+            {"roomName": "Kitchen", "unixTs": 3},
+        ]
+        out = history_core.trail(rows)
+        assert [s["room"] for s in out["segments"]] == ["Kitchen", "Office", "Kitchen"]
+        assert out["rooms_visited"] == ["Kitchen", "Office"]
+
+    def test_alternate_row_spellings(self):
+        rows = [{"room": "Hall", "ts": 10}, {"room": "Hall", "timestamp": 11}]
+        out = history_core.trail(rows)
+        assert out["segments"] == [{"room": "Hall", "points": 2, "first_seen": 10, "last_seen": 11}]
+
+    def test_rows_without_room_are_kept_as_none_segments(self):
+        rows = [
+            {"roomName": "Office", "unixTs": 1},
+            {"x": 1.0, "y": 2.0, "unixTs": 2},
+            {"roomName": "Office", "unixTs": 3},
+        ]
+        out = history_core.trail(rows)
+        assert [s["room"] for s in out["segments"]] == ["Office", None, "Office"]
+        assert out["points"] == 3
+        # an unknown room is not a visit
+        assert out["rooms_visited"] == ["Office"]
+
+    def test_first_row_without_room_still_opens_segment(self):
+        rows = [{"x": 1.0, "y": 2.0, "ts": 0}, {"roomName": "Office", "ts": 1}]
+        out = history_core.trail(rows)
+        assert [s["room"] for s in out["segments"]] == [None, "Office"]
+        assert out["first_seen"] == 0
+
+    def test_non_dict_rows_are_ignored(self):
+        out = history_core.trail([None, "garbage", {"roomName": "Office", "unixTs": 7}])
+        assert out["points"] == 1
+        assert out["segments"] == [{"room": "Office", "points": 1, "first_seen": 7, "last_seen": 7}]
+
+    def test_row_order_is_preserved_not_sorted(self):
+        rows = [
+            {"roomName": "Office", "unixTs": 9},
+            {"roomName": "Kitchen", "unixTs": 2},
+        ]
+        out = history_core.trail(rows)
+        assert out["first_seen"] == 9
+        assert out["last_seen"] == 2
+        assert [s["room"] for s in out["segments"]] == ["Office", "Kitchen"]
+
+    def test_composes_with_get_history_wrapper(self):
+        client = FakeHistoryClient(
+            [{"roomName": "Office", "unixTs": 1}, {"roomName": "Hall", "unixTs": 2}]
+        )
+        rows = history_core.get_history(client, "d1")
+        assert history_core.trail(rows)["rooms_visited"] == ["Office", "Hall"]

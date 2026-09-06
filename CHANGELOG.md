@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.6.0] — 2026-09-06
+
+- `history trail DEVICE_ID` — movement summary for one device, built from the
+  same `/api/history/<id>` rows as `history get` (which stays the raw
+  firehose). Folds the rows into consecutive room segments — one per visit,
+  not one per room — each with first/last-seen timestamps and a point count,
+  plus the overall first/last seen and the list of rooms visited in order.
+  `--start/--end/--limit` match `history get`; `--json` emits the full
+  summary. Accepts both row spellings the companion has shipped
+  (`roomName`/`room`, `unixTs`/`ts`/`timestamp`); rows without a room
+  attribution stay as `room: null` segments so point counts stay honest but
+  don't count as visits.
+- New pure `core/history.trail(rows)` aggregator, unit-tested without a
+  companion in `test_core.py::TestHistoryTrail`; CLI behaviour pinned in
+  `test_full_e2e.py::TestHistoryTrailE2E` and a
+  get/trail-consistency workflow in `TestHistoryWorkflow`.
+
 ## [0.5.0] — 2026-09-06
 
 - Updated `claude.md`, `test.md`. (2 files changed, 5 insertions(+), 4 deletions(-))

@@ -71,7 +71,7 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `devices` (config.yaml) | `devices list-in-config`, `devices show-in-config <id>`, `devices add-to-config 'irk:abc' --name "Jon Phone" --rssi-at-1m -65`, `devices update-in-config 'irk:abc' --rssi-at-1m -61`, `devices remove-from-config 'irk:abc'` |
 | `settings` | `settings show`, `settings show --section mqtt`, `settings get locators.nelder_mead.enabled`, `settings set away_timeout 300`, `settings unset weighting.algorithm`, `settings locators`, `settings locator nadaraya_watson off`, `settings optimizers`, `settings optimizer absorption off` |
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on` |
-| `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50` |
+| `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50`, `history trail <device-id>` (movement summary: room segments per visit, first/last seen, rooms visited) |
 | `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt node-status` (online/offline) |
 | `config` | `config show`, `config save`, `config doctor --file cfg.yaml` |
 | `repl` | Interactive shell (default with no subcommand) |

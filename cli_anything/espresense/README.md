@@ -304,7 +304,7 @@ cli-anything-espresense node config-delete 10.32.101.32 apple:1005:9-12
 | `settings show / get / set / unset / locators / locator / optimizers / optimizer` | Tuning half of config.yaml: timeouts, mqtt, gps, locators, optimizers |
 | `companion settings-keys / settings-get / settings-set` + `mqtt set-global` | Global settings *outside* config.yaml (`/api/settings`, mirrored on MQTT) |
 | `calibration get / summary / reset / auto-optimize` | Calibration matrix + autocalibration |
-| `history get` | Per-device position history |
+| `history get / trail` | Per-device position history; `trail` folds it into a movement summary (consecutive room segments per visit, first/last seen, rooms visited in order) |
 | `mqtt set-node / set-device / set-global / pub / watch` | Raw MQTT pub/sub |
 | `mqtt distances / node-status` | Aggregated live snapshots: node→device distances, node online/offline status |
 | `config show / save / doctor` | Local connection profile + config.yaml validation |
