@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.4.0] — 2026-09-06
+
+- Updated `claude.md`, `test.md`. (2 files changed, 5 insertions(+), 4 deletions(-))
+
 ## v0.3.0 — live presence queries
 
 The harness could configure an ESPresense deployment end to end but could

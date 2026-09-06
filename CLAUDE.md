@@ -9,14 +9,14 @@ Python Click CLI + REPL for operating an ESPresense deployment from the terminal
   - `espresense_cli.py` — Click CLI + REPL (all command groups)
   - `core/` — one module per concern: `companion_api.py`, `config_source.py`, `config_yaml.py`, `validate.py`, `geometry.py`, `floors.py`, `rooms.py`, `nodes.py`, `node_direct.py`, `devices.py`, `config_devices.py`, `settings.py`, `global_settings.py`, `calibration.py`, `history.py`, `telemetry.py`, `stream.py`, `mqtt.py`, `k8s_backend.py`, `project.py`
   - `utils/` — `companion_client.py` (requests Session), `yaml_io.py` (ruamel round-trip), `repl_skin.py`
-  - `tests/` — 1337 tests, synthetic data, no live services
+  - `tests/` — 1419 tests, synthetic data, no live services
 - `setup.py` reads `cli_anything/espresense/README.md` (NOT the repo-root README) as long_description — keep that file present.
 - Skill manifest is duplicated at `skills/cli-anything-espresense/SKILL.md` and `cli_anything/espresense/skills/SKILL.md`.
 
 ## Commands
 ```bash
 pip install -e .                                          # install
-python3 -m pytest cli_anything/espresense/tests/ -v       # test (1337 tests)
+python3 -m pytest cli_anything/espresense/tests/ -v       # test (1419 tests)
 ruff check cli_anything/ && ruff format --check cli_anything/   # lint gate
 bandit -r cli_anything/ -ll -x '*/tests/*,*/test_*.py'    # security gate
 cli-anything-espresense --help                            # CLI help
