@@ -52,7 +52,7 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 | `devices` | `list / show / set / delete / whereis / occupancy` — tracked devices (phones, tags, beacons), incl. last-known position and live room occupancy |
 | `calibration` | `get / summary / reset / auto-optimize` |
 | `history` | `get / trail` — per-device position history, plus a movement summary (room segments per visit, first/last seen, rooms visited in order) |
-| `mqtt` | `set-node / set-device / set-global / pub / watch / distances / node-status` — raw MQTT pub/sub plus aggregated live snapshots (node→device distances, node online/offline) |
+| `mqtt` | `set-node / set-device / set-global / pub / watch / distances / node-status / telemetry` — raw MQTT pub/sub plus aggregated live snapshots (node→device distances, node online/offline, node health: uptime / free memory / RSSI / version) |
 | `config` | `show / save` (local connection profile) + `doctor` (validate config.yaml) |
 | `repl` | Interactive shell (default with no subcommand) |
 
@@ -256,6 +256,7 @@ cli-anything-espresense node config-set 10.32.101.32 apple:1005:9-12 \
 # Push a setting over MQTT (works even for offline nodes via retained)
 cli-anything-espresense mqtt set-node noah-bedroom absorption 2.8
 cli-anything-espresense mqtt set-device apple:1005:9-12 '{"name":"Jon Watch"}'
+cli-anything-espresense mqtt telemetry --duration 5   # node health snapshot
 cli-anything-espresense mqtt watch 'espresense/rooms/+/telemetry' --duration 10
 
 # Global settings via MQTT (retained; re-applied at startup)

@@ -35,6 +35,24 @@ STATUS_RECORDS = [
     {"topic": "espresense/rooms/hall/status", "payload": "offline", "ts": 1.0},
 ]
 
+TELEM_RECORDS = [
+    {
+        "topic": "espresense/rooms/kitchen/telemetry",
+        "payload": '{"uptime": 3600, "freeMem": 143000, "rssi": -62, "ip": "10.0.0.5", "ver": "1.0"}',
+        "ts": 10.0,
+    },
+    {
+        "topic": "espresense/rooms/kitchen/telemetry",
+        "payload": '{"uptime": 3700, "freeMem": 139000, "rssi": -64, "ip": "10.0.0.5", "ver": "1.0"}',
+        "ts": 11.0,
+    },
+    {
+        "topic": "espresense/rooms/hall/telemetry",
+        "payload": '{"uptime": 120, "freeMem": 220000, "rssi": -55, "ip": "10.0.0.6", "ver": "1.0"}',
+        "ts": 12.0,
+    },
+]
+
 
 # ── devices whereis ──────────────────────────────────────────────────────────
 
@@ -274,6 +292,77 @@ class TestMqttNodeStatusE2E:
         assert result.exit_code == 0
 
 
+class TestMqttTelemetryE2E:
+    def test_requires_broker(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "telemetry"])
+        assert result.exit_code == 1
+        assert "no MQTT broker" in result.output
+
+    def test_json_snapshot(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.core.telemetry.mqtt_core.watch",
+            return_value=TELEM_RECORDS,
+        ) as mock_watch:
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "--json", "mqtt", "telemetry"])
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["nodes_reporting"] == ["hall", "kitchen"]
+        kitchen = out["nodes"]["kitchen"]
+        assert kitchen["samples"] == 2
+        assert kitchen["uptime"] == 3700  # max over the window
+        assert kitchen["free_mem"] == 139000  # min over the window
+        assert kitchen["latest"]["ip"] == "10.0.0.5"
+        assert kitchen["latest"]["version"] == "1.0"  # `ver` normalised
+        assert out["lowest_free_mem"] == {"node": "kitchen", "free_mem": 139000}
+        assert out["topic_filter"] == "espresense/rooms/+/telemetry"
+        assert mock_watch.call_args[0][1] == "espresense/rooms/+/telemetry"
+
+    def test_node_filter_flows_to_snapshot(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.core.telemetry.mqtt_core.watch",
+            return_value=TELEM_RECORDS,
+        ):
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "mqtt", "telemetry", "--node", "hall"]
+            )
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["nodes_reporting"] == ["hall"]
+        assert "kitchen" not in out["nodes"]
+
+    def test_human_output_renders_health_table(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.core.telemetry.mqtt_core.watch",
+            return_value=TELEM_RECORDS,
+        ):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "telemetry"])
+        assert result.exit_code == 0
+        assert "kitchen" in result.output
+        assert "139000" in result.output  # the min free_mem, worst case
+        assert "10.0.0.5" in result.output
+
+    def test_human_output_when_nothing_heard(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch("cli_anything.espresense.core.telemetry.mqtt_core.watch", return_value=[]):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "telemetry"])
+        assert result.exit_code == 0
+        assert "no node telemetry" in result.output
+
+    def test_help(self):
+        result = CliRunner().invoke(cli, ["mqtt", "telemetry", "--help"])
+        assert result.exit_code == 0
+        assert "telemetry" in result.output
+
+
 # ── workflows: the new commands compose with the existing ones ───────────────
 
 
@@ -478,3 +567,53 @@ class TestHistoryWorkflow:
                 segments[-1]["points"] += 1
                 segments[-1]["last_seen"] = row["unixTs"]
         assert out["segments"] == segments
+
+
+class TestNodeHealthWorkflow:
+    """`mqtt telemetry` and `mqtt node-status` describe the same fleet.
+
+    Both subscribe to the `<prefix>/rooms/<node>/…` topic family, so the set
+    of nodes each command hears must agree — an operator cross-checking a
+    flapping node should never get two different stories from the broker.
+    """
+
+    def test_telemetry_and_status_see_the_same_nodes(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.core.telemetry.mqtt_core.watch",
+            return_value=TELEM_RECORDS,
+        ):
+            telem = CliRunner().invoke(cli, ["--config", str(cfg), "--json", "mqtt", "telemetry"])
+        with patch(
+            "cli_anything.espresense.core.telemetry.mqtt_core.watch",
+            return_value=[
+                {"topic": "espresense/rooms/kitchen/status", "payload": "online", "ts": 1},
+                {"topic": "espresense/rooms/hall/status", "payload": "online", "ts": 1},
+            ],
+        ):
+            status = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "mqtt", "node-status"]
+            )
+        assert telem.exit_code == 0 and status.exit_code == 0
+        telem_nodes = set(json.loads(telem.output)["nodes_reporting"])
+        status_nodes = set(json.loads(status.output)["online"])
+        assert telem_nodes == status_nodes == {"kitchen", "hall"}
+
+    def test_telemetry_rows_agree_with_the_json_snapshot(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.core.telemetry.mqtt_core.watch",
+            return_value=TELEM_RECORDS,
+        ):
+            as_json = CliRunner().invoke(cli, ["--config", str(cfg), "--json", "mqtt", "telemetry"])
+            as_table = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "telemetry"])
+        assert as_json.exit_code == 0 and as_table.exit_code == 0
+        out = json.loads(as_json.output)
+        # every node in the JSON snapshot appears in the human table, and the
+        # worst-case free_mem shown is the min the aggregation computed
+        for node, entry in out["nodes"].items():
+            assert node in as_table.output
+            if entry.get("free_mem") is not None:
+                assert str(entry["free_mem"]) in as_table.output

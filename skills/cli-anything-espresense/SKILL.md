@@ -39,6 +39,8 @@ per-node ESP32 web UI, and direct MQTT — behind a single Click CLI with full
   seen (`devices whereis`), who is in which room right now
   (`devices occupancy`), which nodes hear a device and at what distance
   (`mqtt distances`), and which nodes are online (`mqtt node-status`).
+- Checking node health without scraping raw JSON: uptime, free memory, wifi
+  RSSI, firmware version per node (`mqtt telemetry`).
 - Pushing per-node BLE settings (absorption, tx_ref_rssi, …) over MQTT.
 
 ## Install
@@ -72,7 +74,7 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `settings` | `settings show`, `settings show --section mqtt`, `settings get locators.nelder_mead.enabled`, `settings set away_timeout 300`, `settings unset weighting.algorithm`, `settings locators`, `settings locator nadaraya_watson off`, `settings optimizers`, `settings optimizer absorption off` |
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on` |
 | `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50`, `history trail <device-id>` (movement summary: room segments per visit, first/last seen, rooms visited) |
-| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt node-status` (online/offline) |
+| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt node-status` (online/offline), `mqtt telemetry [--node <id>]` (node health snapshot: uptime, free memory, RSSI, version) |
 | `config` | `config show`, `config save`, `config doctor --file cfg.yaml` |
 | `repl` | Interactive shell (default with no subcommand) |
 
@@ -232,9 +234,13 @@ been seen, so it can gate a workflow exactly like `rooms locate` does.
 `mqtt distances` and `mqtt node-status` listen on the broker for a bounded
 window (`--duration` seconds) and return aggregated JSON — `distances` marks
 the closest node per device, so "which room is the phone really nearest" is
-`mqtt distances --device <id> --json` and read `nearest[0]`. Use the raw
+`mqtt distances --device <id> --json` and read `nearest[0]`. `mqtt telemetry`
+listens on `<prefix>/rooms/+/telemetry` and aggregates node health per node:
+sample count, worst-case readings over the window (max uptime, min free
+memory, min RSSI) and the most recent full payload, with the lowest-memory
+node flagged in `lowest_free_mem`. Use the raw
 `mqtt watch 'espresense/rooms/+/devices/+'` only when you need every individual
-message; the snapshot is its aggregated view.
+message; the snapshots are their aggregated views.
 
 ## Typical workflows
 

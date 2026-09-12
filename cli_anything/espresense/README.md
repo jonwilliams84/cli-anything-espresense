@@ -130,11 +130,19 @@ cli-anything-espresense mqtt distances --device apple:1005:9-12 --duration 5
 
 # which nodes are online? (retained <prefix>/rooms/<node>/status)
 cli-anything-espresense mqtt node-status
+
+# node health: uptime, free memory, wifi RSSI, firmware version
+cli-anything-espresense mqtt telemetry --duration 5
+cli-anything-espresense mqtt telemetry --node kitchen --json
 ```
 
 `mqtt distances` subscribes to `<prefix>/rooms/+/devices/+` for the window and
 aggregates: per device and node, the most recent distance plus min/max/sample
-count, with the closest node flagged — the readable counterpart to `mqtt
+count, with the closest node flagged. `mqtt telemetry` subscribes to
+`<prefix>/rooms/+/telemetry` and aggregates node health per node: sample
+count, worst-case readings over the window (max uptime, min free memory, min
+RSSI) and the most recent full payload, with the lowest-memory node flagged in
+`lowest_free_mem`. Both are the readable counterparts to `mqtt
 watch`, which stays available for the raw feed. `devices whereis` exits 1 when
 the device has never been seen (but still emits `{"found": false}` JSON), so it
 can gate a script like `rooms locate` does.
@@ -306,7 +314,7 @@ cli-anything-espresense node config-delete 10.32.101.32 apple:1005:9-12
 | `calibration get / summary / reset / auto-optimize` | Calibration matrix + autocalibration |
 | `history get / trail` | Per-device position history; `trail` folds it into a movement summary (consecutive room segments per visit, first/last seen, rooms visited in order) |
 | `mqtt set-node / set-device / set-global / pub / watch` | Raw MQTT pub/sub |
-| `mqtt distances / node-status` | Aggregated live snapshots: node→device distances, node online/offline status |
+| `mqtt distances / node-status / telemetry` | Aggregated live snapshots: node→device distances, node online/offline status, node health (uptime / free memory / RSSI / version) |
 | `config show / save / doctor` | Local connection profile + config.yaml validation |
 | `repl` | Interactive shell (default if no subcommand) |
 
@@ -336,7 +344,7 @@ cli_anything/espresense/
 │   ├── config_devices.py    # the `devices:` block of config.yaml
 │   ├── settings.py          # dotted-path tuning edits (timeouts, mqtt, locators)
 │   ├── global_settings.py   # deployment-wide settings: /api/settings + MQTT mirror
-│   ├── telemetry.py         # live presence queries: whereis, distance/status snapshots, occupancy
+│   ├── telemetry.py         # live queries: whereis, distance/status/telemetry snapshots, occupancy
 │   ├── calibration.py
 │   ├── history.py
 │   ├── stream.py            # /ws WebSocket consumer

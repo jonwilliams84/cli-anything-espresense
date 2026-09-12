@@ -10,6 +10,8 @@ those questions into structured answers:
                         (`<prefix>/rooms/+/devices/+` over MQTT)
 - `status_snapshot`   — which nodes report online/offline
                         (`<prefix>/rooms/<node>/status`, retained by nodes)
+- `telemetry_snapshot` — node health: uptime, free memory, wifi RSSI, firmware
+                        version, IP (`<prefix>/rooms/<node>/telemetry`)
 - `occupancy`         — which tracked devices are currently in which room
 
 Everything that touches the broker goes through `mqtt.watch`; everything else
@@ -245,6 +247,173 @@ def status_snapshot(
         duration=duration,
     )
     out = aggregate_status(records, prefix=prefix)
+    out.update({"topic_filter": topic_filter, "duration": duration, "prefix": prefix})
+    return out
+
+
+# ── node telemetry ───────────────────────────────────────────────────────────
+
+# Keys ESPresense nodes have shipped in their telemetry payloads, mapped to
+# the canonical field names this module reports. Numeric fields get
+# worst-case (max uptime / min free mem / min rssi) tracking over the
+# window; everything else is reported as last-seen.
+_TELEMETRY_ALIASES = {
+    "uptime": "uptime",
+    "freeMem": "free_mem",
+    "free_mem": "free_mem",
+    "rssi": "rssi",
+    "ip": "ip",
+    "model": "model",
+    "ver": "version",
+    "version": "version",
+    "flavor": "flavor",
+}
+_TELEMETRY_NUMERIC = ("uptime", "free_mem", "rssi")
+
+
+def parse_telemetry_payload(payload: str) -> Optional[dict]:
+    """Parse an MQTT node-telemetry message into a canonical dict, or None.
+
+    Nodes publish a JSON object on `<prefix>/rooms/<node>/telemetry`. Known
+    keys are normalised (`freeMem` -> `free_mem`, `ver` -> `version`); unknown
+    keys pass through untouched so a newer firmware's extra fields stay
+    visible. Numeric aliases are coerced where possible; anything that is not
+    a JSON object is rejected so a malformed publisher cannot corrupt a
+    snapshot.
+    """
+    text = (payload or "").strip()
+    if not text:
+        return None
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    out: dict = {}
+    for k, v in obj.items():
+        canon = _TELEMETRY_ALIASES.get(k, k)
+        if canon in _TELEMETRY_NUMERIC and isinstance(v, str):
+            try:
+                v = float(v) if "." in v else int(v)
+            except ValueError:
+                return None
+        out[canon] = v
+    return out
+
+
+def _parse_telemetry_topic(topic: str, prefix: str) -> Optional[str]:
+    """Extract the node id from `<prefix>/rooms/<node>/telemetry`."""
+    rest = _strip_prefix(topic or "", prefix)
+    if rest is None:
+        return None
+    parts = rest.split("/")
+    if len(parts) == 3 and parts[0] == "rooms" and parts[2] == "telemetry":
+        return parts[1]
+    return None
+
+
+def aggregate_node_telemetry(
+    records: list[dict],
+    *,
+    prefix: str = "espresense",
+    node_id: Optional[str] = None,
+) -> dict:
+    """Aggregate raw `mqtt.watch` records into a per-node health table.
+
+    Each reporting node keeps its sample count, the most recent full payload
+    (`latest`), and worst-case numeric readings over the window: max `uptime`,
+    min `free_mem`, min `rssi`. Records with the wrong topic shape, the wrong
+    node, or an unparseable payload are dropped — one malformed publisher
+    never corrupts the snapshot.
+    """
+    nodes: dict[str, dict] = {}
+    messages = 0
+    for rec in records:
+        node = _parse_telemetry_topic(rec.get("topic", ""), prefix)
+        if node is None:
+            continue
+        if node_id is not None and node != node_id:
+            continue
+        parsed = parse_telemetry_payload(rec.get("payload", ""))
+        if parsed is None:
+            continue
+        messages += 1
+        entry = nodes.setdefault(node, {"samples": 0, "latest": {}})
+        entry["samples"] += 1
+        if rec.get("ts") is not None:
+            entry["last_ts"] = rec["ts"]
+        for key in _TELEMETRY_NUMERIC:
+            val = parsed.get(key)
+            if not isinstance(val, (int, float)) or isinstance(val, bool):
+                continue
+            if key == "uptime":
+                cur = entry.get("uptime")
+                entry["uptime"] = val if cur is None else max(cur, val)
+            else:  # free_mem / rssi: lower is worse
+                cur = entry.get(key)
+                entry[key] = val if cur is None else min(cur, val)
+        entry["latest"] = parsed
+    lowest = None
+    mems = {n: e.get("free_mem") for n, e in nodes.items() if e.get("free_mem") is not None}
+    if mems:
+        worst = min(mems, key=lambda n: mems[n])
+        lowest = {"node": worst, "free_mem": mems[worst]}
+    return {
+        "nodes": nodes,
+        "messages": messages,
+        "nodes_reporting": sorted(nodes),
+        "lowest_free_mem": lowest,
+    }
+
+
+def telemetry_rows(snapshot: dict) -> list[dict]:
+    """Flatten a node-telemetry snapshot into one row per node (sorted)."""
+    rows: list[dict] = []
+    for node in sorted(snapshot.get("nodes", {})):
+        entry = snapshot["nodes"][node]
+        latest = entry.get("latest") or {}
+        rows.append(
+            {
+                "node": node,
+                "samples": entry.get("samples", 0),
+                "uptime": entry.get("uptime", latest.get("uptime")),
+                "free_mem": entry.get("free_mem", latest.get("free_mem")),
+                "rssi": entry.get("rssi", latest.get("rssi")),
+                "ip": latest.get("ip"),
+                "model": latest.get("model"),
+                "version": latest.get("version"),
+                "last_ts": entry.get("last_ts"),
+            }
+        )
+    return rows
+
+
+def telemetry_snapshot(
+    host: str,
+    *,
+    duration: float = 5.0,
+    prefix: str = "espresense",
+    node_id: Optional[str] = None,
+    port: int = 1883,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> dict:
+    """Subscribe to `<prefix>/rooms/+/telemetry` for `duration` seconds.
+
+    Returns the aggregated per-node health table — the readable counterpart
+    to scraping the raw `mqtt watch 'espresense/rooms/+/telemetry'` firehose.
+    """
+    topic_filter = f"{prefix}/rooms/+/telemetry"
+    records = mqtt_core.watch(
+        host,
+        topic_filter,
+        port=port,
+        username=username,
+        password=password,
+        duration=duration,
+    )
+    out = aggregate_node_telemetry(records, prefix=prefix, node_id=node_id)
     out.update({"topic_filter": topic_filter, "duration": duration, "prefix": prefix})
     return out
 
