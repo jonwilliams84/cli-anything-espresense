@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.7.0] — 2026-09-12
+
+- `mqtt telemetry [--node <id>] [--duration S] [--prefix P]` — node health
+  snapshot. Every ESPresense node publishes a JSON health report (uptime,
+  free memory, wifi RSSI, IP, firmware version) on
+  `<prefix>/rooms/<node>/telemetry`; until now the only way to see it was
+  scraping the raw `mqtt watch` firehose by eye. This listens for the window
+  and aggregates per node: sample count, worst-case readings over the window
+  (max `uptime`, min `free_mem`, min `rssi` — the values that matter when a
+  node is reboot-looping or leaking memory) and the most recent full payload
+  under `latest`, with the tightest node flagged in `lowest_free_mem`.
+  `--json` emits the full snapshot; human output is a per-node health table.
+- New pure `core/telemetry.py` functions: `parse_telemetry_payload`
+  (normalises firmware key spellings `freeMem`→`free_mem`, `ver`→`version`;
+  passes unknown keys through so a newer firmware's extra fields stay
+  visible; rejects anything that is not a JSON object or has a non-numeric
+  string in a numeric field so one malformed publisher cannot corrupt a
+  snapshot), `aggregate_node_telemetry`, `telemetry_rows` and
+  `telemetry_snapshot`. All aggregation is pure over collected `mqtt.watch`
+  records — only the `watch` call touches the broker — so it is
+  unit-testable without a broker, like `distances`/`node-status`.
+- Unit-tested in `test_core.py` (`TestParseTelemetryPayload`,
+  `TestAggregateNodeTelemetry`, `TestTelemetryRows`, `TestTelemetrySnapshot`);
+  CLI behaviour pinned in `test_full_e2e.py` (`TestMqttTelemetryE2E`) and a
+  cross-command workflow in `TestNodeHealthWorkflow` asserting `mqtt
+  telemetry` and `mqtt node-status` tell the same story about which nodes
+  exist.
+
 ## [0.6.0] — 2026-09-06
 
 - `history trail DEVICE_ID` — movement summary for one device, built from the

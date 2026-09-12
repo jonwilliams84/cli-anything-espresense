@@ -2222,6 +2222,55 @@ def mqtt_node_status(ctx, duration, prefix):
     click.echo(f"offline: {', '.join(out['offline']) or '-'}")
 
 
+@mqtt.command("telemetry")
+@click.option("--node", "node_id", default=None, help="Only this node id")
+@click.option("--duration", default=5.0, type=float, help="Seconds to listen (default: 5)")
+@click.option("--prefix", default=None, help="Topic prefix (default: espresense)")
+@click.pass_context
+def mqtt_telemetry(ctx, node_id, duration, prefix):
+    """Node health snapshot from <prefix>/rooms/+/telemetry.
+
+    Every node publishes a JSON health report (uptime, free memory, wifi
+    RSSI, IP, firmware version) on its telemetry topic. This listens for
+    --duration seconds and aggregates it per node: sample count, worst-case
+    readings over the window (max uptime, min free memory, min RSSI) and
+    the most recent full payload. The readable counterpart to scraping
+    `mqtt watch '<prefix>/rooms/+/telemetry'`.
+
+    Example:
+      mqtt telemetry --duration 5
+      mqtt telemetry --node kitchen --json
+    """
+    kw = _mqtt_args(ctx)
+    out = telemetry_core.telemetry_snapshot(
+        duration=duration,
+        prefix=prefix or ctx.obj.get("mqtt_topic_prefix", "espresense"),
+        node_id=node_id,
+        **kw,
+    )
+    if ctx.obj.get("as_json"):
+        emit(ctx, out)
+        return
+    rows = telemetry_core.telemetry_rows(out)
+    if not rows:
+        click.echo("no node telemetry heard in the window")
+        return
+    header = f"{'node':<16} {'uptime':>10} {'free_mem':>10} {'rssi':>6} {'ip':<16} {'version':<12} {'samples':>7}"
+    click.echo(header)
+    for r in rows:
+        click.echo(
+            "{:<16} {:>10} {:>10} {:>6} {:<16} {:<12} {:>7}".format(
+                r["node"],
+                "-" if r["uptime"] is None else r["uptime"],
+                "-" if r["free_mem"] is None else r["free_mem"],
+                "-" if r["rssi"] is None else r["rssi"],
+                "-" if r["ip"] is None else r["ip"],
+                "-" if r["version"] is None else r["version"],
+                r["samples"],
+            )
+        )
+
+
 # ──────────────────────────────────────────────────────── REPL
 
 

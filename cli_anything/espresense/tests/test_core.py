@@ -1003,3 +1003,174 @@ class TestHistoryTrail:
         )
         rows = history_core.get_history(client, "d1")
         assert history_core.trail(rows)["rooms_visited"] == ["Office", "Hall"]
+
+
+# ── node telemetry snapshots (v0.7.0) ────────────────────────────────────────
+
+
+def _telem_rec(topic, payload, ts=1.0):
+    return {"topic": topic, "payload": payload, "ts": ts}
+
+
+class TestParseTelemetryPayload:
+    def test_canonical_json_payload(self):
+        out = telemetry_core.parse_telemetry_payload(
+            '{"uptime": 3600, "freeMem": 143000, "rssi": -62, "ip": "10.0.0.5", "ver": "1.0"}'
+        )
+        assert out == {
+            "uptime": 3600,
+            "free_mem": 143000,
+            "rssi": -62,
+            "ip": "10.0.0.5",
+            "version": "1.0",
+        }
+
+    def test_unknown_keys_pass_through(self):
+        out = telemetry_core.parse_telemetry_payload('{"uptime": 5, "custom": "x"}')
+        assert out == {"uptime": 5, "custom": "x"}
+
+    def test_numeric_strings_are_coerced(self):
+        out = telemetry_core.parse_telemetry_payload('{"uptime": "120", "rssi": "-55"}')
+        assert out["uptime"] == 120
+        assert out["rssi"] == -55
+
+    def test_non_json_rejected(self):
+        assert telemetry_core.parse_telemetry_payload("online") is None
+        assert telemetry_core.parse_telemetry_payload("") is None
+        assert telemetry_core.parse_telemetry_payload(None) is None
+
+    def test_non_object_json_rejected(self):
+        assert telemetry_core.parse_telemetry_payload("[1,2,3]") is None
+        assert telemetry_core.parse_telemetry_payload('"hello"') is None
+
+    def test_non_numeric_string_in_numeric_field_is_rejected(self):
+        assert telemetry_core.parse_telemetry_payload('{"uptime": "soon"}') is None
+
+
+class TestAggregateNodeTelemetry:
+    def test_per_node_worst_case_and_latest(self):
+        records = [
+            _telem_rec("espresense/rooms/kitchen/telemetry", '{"uptime": 100, "freeMem": 150}'),
+            _telem_rec("espresense/rooms/kitchen/telemetry", '{"uptime": 260, "freeMem": 120}', 2),
+            _telem_rec("espresense/rooms/hall/telemetry", '{"uptime": 10, "rssi": -50}', 3),
+        ]
+        out = telemetry_core.aggregate_node_telemetry(records)
+        assert out["messages"] == 3
+        assert out["nodes_reporting"] == ["hall", "kitchen"]
+        k = out["nodes"]["kitchen"]
+        assert k["samples"] == 2
+        assert k["uptime"] == 260
+        assert k["free_mem"] == 120
+        assert k["latest"] == {"uptime": 260, "free_mem": 120}  # ts=2 record is latest
+        assert k["last_ts"] == 2
+        assert out["nodes"]["hall"]["rssi"] == -50
+
+    def test_lowest_free_mem_is_flagged(self):
+        records = [
+            _telem_rec("espresense/rooms/kitchen/telemetry", '{"freeMem": 40000}'),
+            _telem_rec("espresense/rooms/hall/telemetry", '{"freeMem": 90000}'),
+        ]
+        assert telemetry_core.aggregate_node_telemetry(records)["lowest_free_mem"] == {
+            "node": "kitchen",
+            "free_mem": 40000,
+        }
+
+    def test_no_free_mem_anywhere_gives_none(self):
+        records = [_telem_rec("espresense/rooms/kitchen/telemetry", '{"uptime": 1}')]
+        assert telemetry_core.aggregate_node_telemetry(records)["lowest_free_mem"] is None
+
+    def test_node_filter(self):
+        records = [
+            _telem_rec("espresense/rooms/kitchen/telemetry", '{"uptime": 1}'),
+            _telem_rec("espresense/rooms/hall/telemetry", '{"uptime": 2}'),
+        ]
+        out = telemetry_core.aggregate_node_telemetry(records, node_id="hall")
+        assert out["nodes_reporting"] == ["hall"]
+        assert out["messages"] == 1
+
+    def test_prefix_is_stripped(self):
+        records = [_telem_rec("home/rooms/k/telemetry", '{"uptime": 7}')]
+        assert telemetry_core.aggregate_node_telemetry(records, prefix="home")[
+            "nodes_reporting"
+        ] == ["k"]
+
+    def test_wrong_topics_and_payloads_ignored(self):
+        records = [
+            _telem_rec("espresense/rooms/k/status", '{"uptime": 1}'),  # not telemetry
+            _telem_rec("espresense/rooms/k/telemetry", "online"),  # not JSON
+            _telem_rec("espresense/other/k/telemetry", '{"uptime": 1}'),  # wrong shape
+            _telem_rec("espresense/rooms/k/telemetry", '{"uptime": "soon"}'),  # bad number
+        ]
+        out = telemetry_core.aggregate_node_telemetry(records)
+        assert out["messages"] == 0
+        assert out["nodes"] == {}
+
+    def test_bool_is_not_a_number(self):
+        records = [_telem_rec("espresense/rooms/k/telemetry", '{"uptime": true}')]
+        out = telemetry_core.aggregate_node_telemetry(records)
+        assert out["nodes"]["k"]["samples"] == 1
+        assert "uptime" not in out["nodes"]["k"]
+
+
+class TestTelemetryRows:
+    def test_rows_are_sorted_and_flattened(self):
+        snap = {
+            "nodes": {
+                "hall": {"samples": 1, "latest": {"uptime": 5, "ip": "10.0.0.6"}, "uptime": 5},
+                "kitchen": {
+                    "samples": 2,
+                    "latest": {"free_mem": 100, "version": "1.0"},
+                    "uptime": 200,
+                    "free_mem": 90,
+                    "rssi": -70,
+                    "last_ts": 9.0,
+                },
+            }
+        }
+        rows = telemetry_core.telemetry_rows(snap)
+        assert [r["node"] for r in rows] == ["hall", "kitchen"]
+        assert rows[1] == {
+            "node": "kitchen",
+            "samples": 2,
+            "uptime": 200,
+            "free_mem": 90,
+            "rssi": -70,
+            "ip": None,
+            "model": None,
+            "version": "1.0",
+            "last_ts": 9.0,
+        }
+        assert rows[0]["free_mem"] is None
+
+    def test_empty_snapshot(self):
+        assert telemetry_core.telemetry_rows({"nodes": {}}) == []
+
+
+class TestTelemetrySnapshot:
+    def test_subscribes_and_aggregates(self):
+        records = [_telem_rec("espresense/rooms/kitchen/telemetry", '{"uptime": 60}')]
+        with patch.object(mqtt_core, "watch", return_value=records) as mock_watch:
+            out = telemetry_core.telemetry_snapshot("broker.local", duration=1.5)
+        mock_watch.assert_called_once_with(
+            "broker.local",
+            "espresense/rooms/+/telemetry",
+            port=1883,
+            username=None,
+            password=None,
+            duration=1.5,
+        )
+        assert out["nodes"]["kitchen"]["uptime"] == 60
+        assert out["topic_filter"] == "espresense/rooms/+/telemetry"
+        assert out["duration"] == 1.5
+
+    def test_node_filter_is_forwarded(self):
+        records = [
+            _telem_rec("home/rooms/kitchen/telemetry", '{"uptime": 60}'),
+            _telem_rec("home/rooms/hall/telemetry", '{"uptime": 90}'),
+        ]
+        with patch.object(mqtt_core, "watch", return_value=records) as mock_watch:
+            out = telemetry_core.telemetry_snapshot(
+                "broker.local", node_id="kitchen", prefix="home"
+            )
+        assert mock_watch.call_args[0][1] == "home/rooms/+/telemetry"
+        assert out["nodes_reporting"] == ["kitchen"]
