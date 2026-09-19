@@ -1174,3 +1174,117 @@ class TestTelemetrySnapshot:
             )
         assert mock_watch.call_args[0][1] == "home/rooms/+/telemetry"
         assert out["nodes_reporting"] == ["kitchen"]
+
+
+class TestHistoryHeatmap:
+    """Pure fleet-level room-usage aggregation behind `history heatmap`."""
+
+    def test_empty_input(self):
+        out = history_core.heatmap({})
+        assert out == {
+            "device_count": 0,
+            "points": 0,
+            "visits": 0,
+            "seconds": 0,
+            "rooms": [],
+        }
+
+    def test_no_rows_for_a_device_still_counts_the_device(self):
+        out = history_core.heatmap({"d1": []})
+        assert out["device_count"] == 1
+        assert out["rooms"] == []
+
+    def test_single_device_single_room(self):
+        rows = [
+            {"roomName": "Office", "unixTs": 1},
+            {"roomName": "Office", "unixTs": 3},
+            {"roomName": "Office", "unixTs": 6},
+        ]
+        out = history_core.heatmap({"d1": rows})
+        assert out["device_count"] == 1
+        assert out["points"] == 3
+        assert out["visits"] == 1
+        assert out["seconds"] == 5.0
+        assert out["rooms"] == [
+            {
+                "room": "Office",
+                "points": 3,
+                "visits": 1,
+                "seconds": 5.0,
+                "devices": ["d1"],
+                "first_seen": 1,
+                "last_seen": 6,
+            }
+        ]
+
+    def test_reentries_count_as_separate_visits(self):
+        rows = [
+            {"roomName": "Kitchen", "unixTs": 1},
+            {"roomName": "Office", "unixTs": 3},
+            {"roomName": "Kitchen", "unixTs": 5},
+            {"roomName": "Kitchen", "unixTs": 8},
+        ]
+        out = history_core.heatmap({"d1": rows})
+        kitchen = out["rooms"][0]
+        assert kitchen["room"] == "Kitchen"
+        assert kitchen["points"] == 3
+        assert kitchen["visits"] == 2
+        assert kitchen["seconds"] == (0 + 3)  # spans 1-1 and 5-8
+        assert kitchen["devices"] == ["d1"]
+
+    def test_multiple_devices_are_merged_per_room(self):
+        d1 = [{"roomName": "Office", "unixTs": 1}, {"roomName": "Office", "unixTs": 4}]
+        d2 = [
+            {"room": "Office", "ts": 10},  # alternate spellings accepted
+            {"room": "Hall", "ts": 20},
+        ]
+        out = history_core.heatmap({"d1": d1, "d2": d2})
+        office = next(r for r in out["rooms"] if r["room"] == "Office")
+        assert office["points"] == 3
+        assert office["visits"] == 2
+        assert office["seconds"] == 3.0  # (4-1) + single-point visit (10-10)
+        assert office["devices"] == ["d1", "d2"]
+        assert office["first_seen"] == 1
+        assert office["last_seen"] == 10
+        hall = next(r for r in out["rooms"] if r["room"] == "Hall")
+        assert hall["points"] == 1
+        assert hall["devices"] == ["d2"]
+        assert out["visits"] == 3
+        assert out["device_count"] == 2
+
+    def test_rooms_sorted_most_used_first(self):
+        d1 = [
+            {"roomName": "Hall", "unixTs": 1},
+            {"roomName": "Office", "unixTs": 2},
+            {"roomName": "Office", "unixTs": 3},
+            {"roomName": "Office", "unixTs": 4},
+        ]
+        out = history_core.heatmap({"d1": d1})
+        assert [r["room"] for r in out["rooms"]] == ["Office", "Hall"]
+
+    def test_unattributed_bucket_sorts_last_and_has_no_visits(self):
+        d1 = [
+            {"unixTs": 1},
+            {"roomName": "Office", "unixTs": 2},
+        ]
+        out = history_core.heatmap({"d1": d1})
+        assert [r["room"] for r in out["rooms"]] == ["Office", None]
+        unattr = out["rooms"][-1]
+        assert unattr["points"] == 1
+        assert unattr["visits"] == 0
+        assert unattr["devices"] == []
+        assert out["points"] == 2  # unattributed points stay in the total
+
+    def test_non_numeric_timestamps_contribute_no_seconds(self):
+        d1 = [
+            {"roomName": "Office", "unixTs": "not-a-number"},
+            {"roomName": "Office", "unixTs": "also-not"},
+        ]
+        out = history_core.heatmap({"d1": d1})
+        assert out["rooms"][0]["seconds"] == 0.0
+        assert out["seconds"] == 0.0
+
+    def test_rows_may_be_any_iterable_of_dicts(self):
+        # trail() ignores non-dict rows; heatmap inherits that resilience.
+        out = history_core.heatmap({"d1": [{"roomName": "Office", "unixTs": 1}, "junk"]})
+        assert out["points"] == 1

@@ -617,3 +617,169 @@ class TestNodeHealthWorkflow:
             assert node in as_table.output
             if entry.get("free_mem") is not None:
                 assert str(entry["free_mem"]) in as_table.output
+
+
+class TestHistoryHeatmapE2E:
+    """`history heatmap` — room usage across many devices (v0.8.0 refine)."""
+
+    ROWS = {
+        "d1": [
+            {"x": 1.0, "y": 1.0, "roomName": "Kitchen", "unixTs": 1},
+            {"x": 1.2, "y": 1.1, "roomName": "Kitchen", "unixTs": 3},
+            {"x": 2.5, "y": 3.0, "roomName": "Office", "unixTs": 7},
+        ],
+        "d2": [
+            {"x": 2.0, "y": 2.0, "roomName": "Office", "unixTs": 10},
+            {"x": 2.1, "y": 2.0, "roomName": "Office", "unixTs": 14},
+        ],
+    }
+
+    def _client(self):
+        client = MagicMock()
+
+        def fake_get(path, params=None, **kw):
+            if path == "/api/state/devices":
+                return [{"id": "d1", "name": "Jon Phone"}, {"id": "d2", "name": "Watch"}]
+            if path.startswith("/api/history/"):
+                return {"history": self.ROWS[path.rsplit("/", 1)[-1]]}
+            raise AssertionError(f"unexpected path {path}")
+
+        client.get.side_effect = fake_get
+        return client
+
+    def _run(self, tmp_path, monkeypatch, *args):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.espresense_cli.make_client",
+            return_value=self._client(),
+        ):
+            return CliRunner().invoke(cli, ["--config", str(cfg), *args])
+
+    def test_json_aggregates_all_tracked_devices(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch, "--json", "history", "heatmap")
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["device_count"] == 2
+        assert out["devices_queried"] == 2
+        assert out["points"] == 5
+        assert out["visits"] == 3
+        assert out["seconds"] == 6.0  # kitchen 1-3 (2) + office 7-7 (0) + office 10-14 (4)
+        rooms = {r["room"]: r for r in out["rooms"]}
+        assert rooms["Kitchen"]["points"] == 2
+        assert rooms["Kitchen"]["visits"] == 1
+        assert rooms["Office"]["devices"] == ["d1", "d2"]
+        # most-used room first
+        assert out["rooms"][0]["room"] == "Office"
+
+    def test_fetches_every_tracked_device_by_default(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        client = self._client()
+        with patch("cli_anything.espresense.espresense_cli.make_client", return_value=client):
+            CliRunner().invoke(cli, ["--config", str(cfg), "--json", "history", "heatmap"])
+        paths = [c.args[0] for c in client.get.call_args_list]
+        assert "/api/state/devices" in paths
+        assert "/api/history/d1" in paths and "/api/history/d2" in paths
+
+    def test_device_filter_skips_the_discovery_call(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        client = self._client()
+        with patch("cli_anything.espresense.espresense_cli.make_client", return_value=client):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--config",
+                    str(cfg),
+                    "--json",
+                    "history",
+                    "heatmap",
+                    "--device",
+                    "d2",
+                ],
+            )
+        assert result.exit_code == 0
+        paths = [c.args[0] for c in client.get.call_args_list]
+        assert "/api/state/devices" not in paths
+        assert "/api/history/d1" not in paths
+        out = json.loads(result.output)
+        assert out["device_count"] == 1
+        assert out["devices_queried"] == 1
+        assert [r["room"] for r in out["rooms"]] == ["Office"]
+
+    def test_limit_is_applied_per_device(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch, "--json", "history", "heatmap", "--limit", "1")
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        # only each device's last point survives the fold
+        assert out["points"] == 2
+        assert [r["room"] for r in out["rooms"]] == ["Office"]
+
+    def test_empty_history_renders_the_no_data_line(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        client = MagicMock()
+        client.get.side_effect = lambda path, params=None, **kw: (
+            [{"id": "d1"}] if path == "/api/state/devices" else {"history": []}
+        )
+        with patch("cli_anything.espresense.espresense_cli.make_client", return_value=client):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "history", "heatmap"])
+        assert result.exit_code == 0
+        assert "no room history" in result.output
+
+    def test_human_output_is_a_usage_table(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch, "history", "heatmap")
+        assert result.exit_code == 0
+        assert "devices: 2 (of 2 queried)" in result.output
+        assert "Office" in result.output and "Kitchen" in result.output
+        assert "visits" in result.output  # header
+
+
+class TestRoomUsageWorkflow:
+    """`history trail` (one device) and `history heatmap` (the fleet) agree.
+
+    Both fold the same /api/history/<id> rows with the same segment rules, so
+    the rooms a per-device trail reports must be a subset of what the heatmap
+    attributes to that same device — an agent triangulating "which room does
+    this phone actually live in" must never get two different stories.
+    """
+
+    ROWS = {
+        "d1": [
+            {"roomName": "Kitchen", "unixTs": 1},
+            {"roomName": "Kitchen", "unixTs": 4},
+            {"roomName": "Office", "unixTs": 6},
+            {"roomName": "Kitchen", "unixTs": 9},
+        ],
+        "d2": [{"roomName": "Office", "unixTs": 2}, {"roomName": "Office", "unixTs": 5}],
+    }
+
+    def test_trail_rooms_are_attributed_to_the_device_in_the_heatmap(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        client = MagicMock()
+
+        def fake_get(path, params=None, **kw):
+            if path == "/api/state/devices":
+                return [{"id": "d1"}, {"id": "d2"}]
+            return {"history": self.ROWS[path.rsplit("/", 1)[-1]]}
+
+        client.get.side_effect = fake_get
+        with patch("cli_anything.espresense.espresense_cli.make_client", return_value=client):
+            trail = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "history", "trail", "d1"]
+            )
+            heat = CliRunner().invoke(cli, ["--config", str(cfg), "--json", "history", "heatmap"])
+
+        assert trail.exit_code == 0 and heat.exit_code == 0
+        trail_out = json.loads(trail.output)
+        heat_out = json.loads(heat.output)
+        trail_rooms = set(trail_out["rooms_visited"])
+        by_room = {r["room"]: r for r in heat_out["rooms"]}
+        assert trail_rooms <= set(by_room)
+        assert "d1" in by_room["Kitchen"]["devices"]
+        assert "d1" in by_room["Office"]["devices"]
+        # visit counts agree: d1 enters Kitchen twice
+        assert by_room["Kitchen"]["visits"] == 2
+        assert by_room["Office"]["visits"] == 2  # d1 once + d2 once

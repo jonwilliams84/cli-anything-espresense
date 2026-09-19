@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.8.0] — 2026-09-19
+
+- `history heatmap` — fleet-level room-usage analytics. `history trail`
+  (v0.6.0) answers "where has *this one device* been?"; the question that was
+  still a hand-rolled script is "which rooms actually get used, by how many
+  devices, for how long?" — the question you need answered when validating
+  sensor placement or arguing about which rooms justify their node. The new
+  command fetches history for every tracked device (or just the
+  `--device <id>` ids you pass, repeatable) and folds all of it into one
+  usage table per room: point count, visits (a room re-entered counts once
+  per visit), dwell `seconds` (sum of each visit's first→last-seen span — a
+  documented lower bound, since it only spans sampled points) and the
+  devices that visited, sorted most-used first. `--start/--end/--limit`
+  match `history trail` (`--limit` applies per device); `--json` emits the
+  full snapshot; human output is a summary line plus the room table. Rows
+  without a room attribution stay in a `room: null` bucket that sorts last
+  and never counts as a visit or a device, so point counts stay honest.
+- New pure `core/history.heatmap(history_by_device)` aggregator: it folds
+  each device's rows through the existing `trail()` segment rules and merges
+  the segments, so the per-device and fleet views agree by construction.
+  Non-numeric timestamps contribute 0 seconds instead of corrupting the
+  total; the only transport is the history fetch the CLI command performs.
+- Unit-tested in `test_core.py` (`TestHistoryHeatmap`: empty input, visit
+  counting across re-entries, multi-device merging with both row spellings,
+  sort order, unattributed bucket, non-numeric timestamps); CLI behaviour
+  pinned in `test_full_e2e.py` (`TestHistoryHeatmapE2E`: device discovery
+  via `/api/state/devices`, `--device` skipping the discovery call, per-device
+  `--limit`, empty-history message, human table) and a cross-command workflow
+  in `TestRoomUsageWorkflow` asserting `history trail` and `history heatmap`
+  attribute the same rooms and visit counts to the same device.
+- Docs updated: both READMEs, both SKILL.md copies (kept byte-identical),
+  TEST.md, CLAUDE.md.
+
 ## [0.7.0] — 2026-09-12
 
 - `mqtt telemetry [--node <id>] [--duration S] [--prefix P]` — node health

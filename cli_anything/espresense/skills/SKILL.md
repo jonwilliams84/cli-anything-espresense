@@ -1,6 +1,6 @@
 ---
 name: cli-anything-espresense
-description: CLI harness for the ESPresense ecosystem — read/edit/validate the companion's YAML config, rotate or rename rooms, add and reshape room polygons, manage floors and their bounds, place nodes by geometry, curate the tracked-device registry, tune timeouts/locators/optimizers by dotted path, set deployment-wide global settings over REST or MQTT, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry, and query live presence (last-known position, node-to-device distances, node status, room occupancy).
+description: CLI harness for the ESPresense ecosystem — read/edit/validate the companion's YAML config, rotate or rename rooms, add and reshape room polygons, manage floors and their bounds, place nodes by geometry, curate the tracked-device registry, tune timeouts/locators/optimizers by dotted path, set deployment-wide global settings over REST or MQTT, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry, query live presence (last-known position, node-to-device distances, node status, room occupancy), and aggregate fleet-level room usage from device history.
 ---
 
 # cli-anything-espresense
@@ -39,6 +39,10 @@ per-node ESP32 web UI, and direct MQTT — behind a single Click CLI with full
   seen (`devices whereis`), who is in which room right now
   (`devices occupancy`), which nodes hear a device and at what distance
   (`mqtt distances`), and which nodes are online (`mqtt node-status`).
+- Asking which rooms actually get used: `history heatmap` folds every
+  tracked device's history into one usage table per room (points, visits,
+  dwell seconds, devices) — validating sensor placement without scripting
+  one `history trail` per device.
 - Checking node health without scraping raw JSON: uptime, free memory, wifi
   RSSI, firmware version per node (`mqtt telemetry`).
 - Pushing per-node BLE settings (absorption, tx_ref_rssi, …) over MQTT.
@@ -73,7 +77,7 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `devices` (config.yaml) | `devices list-in-config`, `devices show-in-config <id>`, `devices add-to-config 'irk:abc' --name "Jon Phone" --rssi-at-1m -65`, `devices update-in-config 'irk:abc' --rssi-at-1m -61`, `devices remove-from-config 'irk:abc'` |
 | `settings` | `settings show`, `settings show --section mqtt`, `settings get locators.nelder_mead.enabled`, `settings set away_timeout 300`, `settings unset weighting.algorithm`, `settings locators`, `settings locator nadaraya_watson off`, `settings optimizers`, `settings optimizer absorption off` |
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on` |
-| `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50`, `history trail <device-id>` (movement summary: room segments per visit, first/last seen, rooms visited) |
+| `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50`, `history trail <device-id>` (movement summary: room segments per visit, first/last seen, rooms visited), `history heatmap [--device <id>]... [--limit N]` (room usage across all tracked devices: points, visits, dwell seconds, devices per room, most-used first) |
 | `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt node-status` (online/offline), `mqtt telemetry [--node <id>]` (node health snapshot: uptime, free memory, RSSI, version) |
 | `config` | `config show`, `config save`, `config doctor --file cfg.yaml` |
 | `repl` | Interactive shell (default with no subcommand) |
@@ -241,6 +245,16 @@ memory, min RSSI) and the most recent full payload, with the lowest-memory
 node flagged in `lowest_free_mem`. Use the raw
 `mqtt watch 'espresense/rooms/+/devices/+'` only when you need every individual
 message; the snapshots are their aggregated views.
+
+**`history heatmap` is the fleet-level `history trail`.** It fetches every
+tracked device's history (or just the `--device` ids you pass) and folds all
+of it into one room-usage table: points, visits (a re-entry counts again),
+dwell `seconds` (sum of each visit's first→last-seen span — a lower bound,
+since it only spans sampled points) and the devices that visited, sorted
+most-used first. Rows without a room attribution stay in a `room: null`
+bucket that sorts last and never counts as a visit. Use it to answer "is the
+study actually used?" or "which rooms justify their node?" — the per-device
+story is still `history trail <id>`, and the two agree by construction.
 
 ## Typical workflows
 

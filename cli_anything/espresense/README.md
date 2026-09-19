@@ -134,6 +134,10 @@ cli-anything-espresense mqtt node-status
 # node health: uptime, free memory, wifi RSSI, firmware version
 cli-anything-espresense mqtt telemetry --duration 5
 cli-anything-espresense mqtt telemetry --node kitchen --json
+
+# which rooms actually get used? (folds every tracked device's history)
+cli-anything-espresense history heatmap
+cli-anything-espresense history heatmap --device apple:1005:9-12 --limit 500
 ```
 
 `mqtt distances` subscribes to `<prefix>/rooms/+/devices/+` for the window and
@@ -313,6 +317,7 @@ cli-anything-espresense node config-delete 10.32.101.32 apple:1005:9-12
 | `companion settings-keys / settings-get / settings-set` + `mqtt set-global` | Global settings *outside* config.yaml (`/api/settings`, mirrored on MQTT) |
 | `calibration get / summary / reset / auto-optimize` | Calibration matrix + autocalibration |
 | `history get / trail` | Per-device position history; `trail` folds it into a movement summary (consecutive room segments per visit, first/last seen, rooms visited in order) |
+| `history heatmap` | Fleet-level room usage: folds every tracked device's history into one table per room — points, visits (re-entries count), dwell seconds (visit spans, a lower bound) and the devices that visited, sorted most-used first. `--device` narrows to specific devices |
 | `mqtt set-node / set-device / set-global / pub / watch` | Raw MQTT pub/sub |
 | `mqtt distances / node-status / telemetry` | Aggregated live snapshots: node→device distances, node online/offline status, node health (uptime / free memory / RSSI / version) |
 | `config show / save / doctor` | Local connection profile + config.yaml validation |

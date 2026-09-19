@@ -77,3 +77,70 @@ def trail(rows: list[dict]) -> dict:
         "rooms_visited": rooms_visited,
         "segments": segments,
     }
+
+
+def heatmap(history_by_device: dict[str, list[dict]]) -> dict:
+    """Aggregate room usage across many devices' history rows.
+
+    The fleet-level counterpart to `trail`: input is a mapping of device id
+    to that device's history rows (exactly what `get_history` returns), and
+    output folds every device's segments into one per-room usage table:
+    point count, visit count (a room re-entered counts once per visit),
+    total dwell `seconds` (sum of each visit's last_seen - first_seen; a
+    lower bound, since it spans only sampled points) and the devices that
+    visited. Rooms are sorted most-used first (points, then name); the
+    `room: None` bucket for rows without a room attribution always sorts
+    last so it cannot masquerade as a real room.
+
+    Pure over the mapping — no I/O, no schema assumptions beyond the same
+    alternate field spellings `trail` accepts.
+    """
+    rooms: dict[Any, dict] = {}
+
+    def _room_rec(room: Any) -> dict:
+        return rooms.setdefault(
+            room,
+            {
+                "room": room,
+                "points": 0,
+                "visits": 0,
+                "seconds": 0.0,
+                "devices": [],
+                "first_seen": None,
+                "last_seen": None,
+            },
+        )
+
+    for device_id, rows in (history_by_device or {}).items():
+        for seg in trail(rows)["segments"]:
+            room = seg["room"]
+            rec = _room_rec(room)
+            rec["points"] += seg["points"]
+            fs, ls = seg["first_seen"], seg["last_seen"]
+            if room is not None:
+                rec["visits"] += 1
+                if device_id not in rec["devices"]:
+                    rec["devices"].append(device_id)
+            if (
+                isinstance(fs, (int, float))
+                and isinstance(ls, (int, float))
+                and not isinstance(fs, bool)
+                and not isinstance(ls, bool)
+            ):
+                rec["seconds"] += max(ls - fs, 0)
+            if fs is not None and (rec["first_seen"] is None or fs < rec["first_seen"]):
+                rec["first_seen"] = fs
+            if ls is not None and (rec["last_seen"] is None or ls > rec["last_seen"]):
+                rec["last_seen"] = ls
+
+    real = [r for room, r in rooms.items() if room is not None]
+    unattributed = [r for room, r in rooms.items() if room is None]
+    real.sort(key=lambda r: (-r["points"], str(r["room"])))
+    total_seconds = sum(r["seconds"] for r in real)
+    return {
+        "device_count": len(history_by_device or {}),
+        "points": sum(r["points"] for r in real) + sum(r["points"] for r in unattributed),
+        "visits": sum(r["visits"] for r in real),
+        "seconds": round(total_seconds, 3),
+        "rooms": real + unattributed,
+    }
