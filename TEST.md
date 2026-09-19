@@ -4,14 +4,14 @@ The suite runs against synthetic data on disk — no live companion, cluster,
 broker or node is ever contacted.
 
 ```bash
-python3 -m pytest cli_anything/espresense/tests/ -v          # 1509 tests
+python3 -m pytest cli_anything/espresense/tests/ -v          # 1525 tests
 python3 -m pytest cli_anything/espresense/tests/ \
   --cov=cli_anything --cov-fail-under=90 -q                  # CI gate shape
 ruff check cli_anything/ && ruff format --check cli_anything/
 bandit -r cli_anything/ -ll -x '*/tests/*,*/test_*.py,*/conftest.py'
 ```
 
-Current state: **1509 tests, all four gates green (coverage 98.74%).**
+Current state: **1525 tests, all four gates green (coverage 98.76%).**
 
 ## What is covered where
 
@@ -28,6 +28,7 @@ Current state: **1509 tests, all four gates green (coverage 98.74%).**
 | **Live presence queries (`devices whereis/occupancy`, `mqtt distances/node-status`)** | `test_core.py` (`TestParseDistancePayload`, `TestTopicParsing`, `TestAggregateDistances`, `TestNearest`, `TestDistanceRows`, `TestDistanceSnapshot`, `TestAggregateStatus`, `TestStatusSnapshot`, `TestOccupancy`, `TestWhereis`) | `test_full_e2e.py` (`TestDevicesWhereisE2E`, `TestDevicesOccupancyE2E`, `TestMqttDistancesE2E`, `TestMqttNodeStatusE2E`, `TestPresenceWorkflow`) |
 | **History analytics (`history trail` movement summary)** | `test_core.py` (`TestHistoryTrail`) | `test_full_e2e.py` (`TestHistoryTrailE2E`, `TestHistoryWorkflow`) |
 | **Node health snapshots (`mqtt telemetry`)** | `test_core.py` (`TestParseTelemetryPayload`, `TestAggregateNodeTelemetry`, `TestTelemetryRows`, `TestTelemetrySnapshot`) | `test_full_e2e.py` (`TestMqttTelemetryE2E`, `TestNodeHealthWorkflow`) |
+| **Fleet room-usage analytics (`history heatmap`)** | `test_core.py` (`TestHistoryHeatmap`) | `test_full_e2e.py` (`TestHistoryHeatmapE2E`, `TestRoomUsageWorkflow`) |
 | Docs stay in sync with the CLI | `test_docs_sync.py` | — |
 | REPL loop, prompt-toolkit skin, stream/watch edge cases, direct-node group, remaining CLI error/no-op branches | `test_refine_hardening.py` | — |
 | CLI error-path contract (`_abort`: stderr + exit 1, no traceback) and last core gaps (calibration wrappers, `FileSource` backup failure, kubectl-missing, node-direct HTTP errors, rotate validation, transport wrapping, `python -m` entry) | `test_error_paths.py` | — |

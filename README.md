@@ -51,7 +51,7 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 | `node` | `info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete` — direct HTTP to one ESP firmware node |
 | `devices` | `list / show / set / delete / whereis / occupancy` — tracked devices (phones, tags, beacons), incl. last-known position and live room occupancy |
 | `calibration` | `get / summary / reset / auto-optimize` |
-| `history` | `get / trail` — per-device position history, plus a movement summary (room segments per visit, first/last seen, rooms visited in order) |
+| `history` | `get / trail / heatmap` — per-device position history, a movement summary (room segments per visit, first/last seen, rooms visited in order), and a fleet-level room-usage heatmap (points, visits, dwell seconds and devices per room, across all tracked devices) |
 | `mqtt` | `set-node / set-device / set-global / pub / watch / distances / node-status / telemetry` — raw MQTT pub/sub plus aggregated live snapshots (node→device distances, node online/offline, node health: uptime / free memory / RSSI / version) |
 | `config` | `show / save` (local connection profile) + `doctor` (validate config.yaml) |
 | `repl` | Interactive shell (default with no subcommand) |
@@ -264,6 +264,10 @@ cli-anything-espresense mqtt set-global expiration 300
 
 # Live device-position stream
 cli-anything-espresense companion stream --duration 30 --type deviceChanged
+
+# Room usage across the whole household (folds every tracked device's history)
+cli-anything-espresense history heatmap
+cli-anything-espresense history heatmap --device apple:1005:9-12 --limit 500
 ```
 
 ## Architecture

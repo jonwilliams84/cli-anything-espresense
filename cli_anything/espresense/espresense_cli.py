@@ -2013,6 +2013,69 @@ def history_trail(ctx, device_id, start, end, limit):
     emit(ctx, out["segments"])
 
 
+@history.command("heatmap")
+@click.option(
+    "--device",
+    "device_ids",
+    multiple=True,
+    help="Only this device id (repeatable). Default: every tracked device.",
+)
+@click.option("--start", default=None, help="UTC start (ISO-8601), optional")
+@click.option("--end", default=None, help="UTC end (ISO-8601), optional")
+@click.option("--limit", default=None, type=int, help="Fold only the last N points per device")
+@click.pass_context
+def history_heatmap(ctx, device_ids, start, end, limit):
+    """Which rooms get used, across all (or selected) tracked devices.
+
+    The fleet-level counterpart to `history trail`: fetches each device's
+    history, folds every device into room segments, and aggregates them into
+    one usage table per room — points, visits (a re-entry counts again),
+    dwell seconds (sum of each visit's first→last-seen span, a lower bound)
+    and the devices that visited, sorted most-used first. Answers "is the
+    study actually used?" or "which rooms justify their node?" without
+    scripting one `history trail` per device.
+
+    Example:
+      history heatmap
+      history heatmap --device apple:1005:9-12 --device android:xyz --limit 500
+    """
+    client = make_client(ctx)
+    if device_ids:
+        ids = list(device_ids)
+    else:
+        devices = companion_api.list_devices(client)
+        ids = [d.get("id") for d in devices if isinstance(d, dict) and d.get("id")]
+    history_by_device: dict = {}
+    for device_id in ids:
+        rows = history_core.get_history(client, device_id, start=start, end=end)
+        if limit:
+            rows = rows[-limit:]
+        if rows:
+            history_by_device[device_id] = rows
+    out = history_core.heatmap(history_by_device)
+    out["devices_queried"] = len(ids)
+    if ctx.obj.get("as_json"):
+        emit(ctx, out)
+        return
+    if not out["rooms"]:
+        click.echo("no room history found for the queried devices")
+        return
+    click.echo(f"devices: {out['device_count']} (of {out['devices_queried']} queried)")
+    header = f"{'room':<20} {'visits':>7} {'points':>7} {'seconds':>9} {'devices':>8}"
+    click.echo(header)
+    for r in out["rooms"]:
+        click.echo(
+            "{:<20} {:>7} {:>7} {:>9} {:>8}".format(
+                "-" if r["room"] is None else str(r["room"]),
+                r["visits"],
+                r["points"],
+                r["seconds"],
+                len(r["devices"]),
+            )
+        )
+    emit(ctx, out["rooms"])
+
+
 # ──────────────────────────────────────────────────────── mqtt
 
 
