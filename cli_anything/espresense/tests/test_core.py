@@ -11,6 +11,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from cli_anything.espresense.core import (
+    config_yaml as config_yaml_core,
     global_settings as global_settings_core,
     history as history_core,
     mqtt as mqtt_core,
@@ -1288,3 +1289,107 @@ class TestHistoryHeatmap:
         # trail() ignores non-dict rows; heatmap inherits that resilience.
         out = history_core.heatmap({"d1": [{"roomName": "Office", "unixTs": 1}, "junk"]})
         assert out["points"] == 1
+
+
+# ── config diff (v0.9.0) ─────────────────────────────────────────────────────
+
+
+class TestConfigDiff:
+    """`config_yaml.diff_configs` — the pure semantic diff behind `config diff`."""
+
+    def test_empty_docs_are_identical(self):
+        assert config_yaml_core.diff_configs({}, {}) == {"identical": True, "differences": []}
+
+    def test_same_doc_is_identical(self):
+        doc = {"timeout": 30, "floors": [{"id": "ground"}]}
+        assert config_yaml_core.diff_configs(doc, dict(doc))["identical"] is True
+
+    def test_scalar_change_at_root(self):
+        out = config_yaml_core.diff_configs({"timeout": 30}, {"timeout": 45})
+        assert out["identical"] is False
+        assert out["differences"] == [{"path": "timeout", "kind": "changed", "old": 30, "new": 45}]
+
+    def test_nested_dict_paths_are_dotted(self):
+        out = config_yaml_core.diff_configs(
+            {"mqtt": {"url": "a", "port": 1883}}, {"mqtt": {"url": "b", "port": 1883}}
+        )
+        assert out["differences"] == [
+            {"path": "mqtt.url", "kind": "changed", "old": "a", "new": "b"}
+        ]
+
+    def test_keys_added_on_b_and_removed_from_a(self):
+        out = config_yaml_core.diff_configs({"gone": 1, "kept": 2}, {"kept": 2, "fresh": 3})
+        kinds = {(d["path"], d["kind"]) for d in out["differences"]}
+        assert ("gone", "removed") in kinds
+        assert ("fresh", "added") in kinds
+        assert ("kept", "changed") not in kinds
+
+    def test_list_element_change_uses_index_path(self):
+        a = {"rooms": [{"name": "Kitchen", "timeout": 10}, {"name": "Hall", "timeout": 10}]}
+        b = {"rooms": [{"name": "Kitchen", "timeout": 10}, {"name": "Hall", "timeout": 20}]}
+        out = config_yaml_core.diff_configs(a, b)
+        assert out["differences"] == [
+            {"path": "rooms[1].timeout", "kind": "changed", "old": 10, "new": 20}
+        ]
+
+    def test_list_length_change_reports_added_and_removed(self):
+        out = config_yaml_core.diff_configs({"rooms": ["a", "b"]}, {"rooms": ["a", "b", "c"]})
+        assert [(d["path"], d["kind"]) for d in out["differences"]] == [("rooms[2]", "added")]
+        out = config_yaml_core.diff_configs({"rooms": ["a", "b", "c"]}, {"rooms": ["a"]})
+        assert [(d["path"], d["kind"]) for d in out["differences"]] == [
+            ("rooms[1]", "removed"),
+            ("rooms[2]", "removed"),
+        ]
+
+    def test_container_type_change_is_a_single_changed_record(self):
+        out = config_yaml_core.diff_configs({"x": {"a": 1}}, {"x": [1]})
+        assert out["differences"] == [{"path": "x", "kind": "changed", "old": {"a": 1}, "new": [1]}]
+
+    def test_secret_leaves_are_redacted_by_default(self):
+        out = config_yaml_core.diff_configs(
+            {"mqtt": {"password": "hunter2"}}, {"mqtt": {"password": "newpass"}}
+        )
+        assert out["differences"] == [
+            {"path": "mqtt.password", "kind": "changed", "old": "***", "new": "***"}
+        ]
+
+    def test_non_secret_values_are_not_masked(self):
+        out = config_yaml_core.diff_configs(
+            {"mqtt": {"password": "x", "url": "a"}}, {"mqtt": {"password": "y", "url": "b"}}
+        )
+        by_path = {d["path"]: d for d in out["differences"]}
+        assert by_path["mqtt.url"]["old"] == "a"
+        assert by_path["mqtt.password"]["old"] == "***"
+
+    def test_redact_secrets_false_reveals_values(self):
+        out = config_yaml_core.diff_configs(
+            {"mqtt": {"password": "hunter2"}},
+            {"mqtt": {"password": "newpass"}},
+            redact_secrets=False,
+        )
+        assert out["differences"] == [
+            {"path": "mqtt.password", "kind": "changed", "old": "hunter2", "new": "newpass"}
+        ]
+
+    def test_secret_redaction_survives_list_index_paths(self):
+        out = config_yaml_core.diff_configs(
+            {"trackers": [{"token": "a"}]}, {"trackers": [{"token": "b"}]}
+        )
+        assert out["differences"][0]["path"] == "trackers[0].token"
+        assert out["differences"][0]["old"] == "***"
+
+    def test_added_secret_only_side_is_masked(self):
+        out = config_yaml_core.diff_configs({}, {"api_token": "s3cr3t"})
+        # both sides are masked, even the absent one — simpler and leak-proof
+        assert out["differences"] == [
+            {"path": "api_token", "kind": "added", "old": "***", "new": "***"}
+        ]
+
+    def test_works_on_ruamel_parsed_documents(self):
+        # The CLI feeds it the output of yaml_io.load / the companion API;
+        # ruamel's CommentedMap/CommentedSeq subclass dict/list, so equality
+        # and isinstance checks must hold.
+        a = yaml_io.load("timeout: 30\nfloors:\n  - id: ground\n")
+        b = yaml_io.load("timeout: 45\nfloors:\n  - id: ground\n")
+        out = config_yaml_core.diff_configs(a, b)
+        assert out["differences"] == [{"path": "timeout", "kind": "changed", "old": 30, "new": 45}]

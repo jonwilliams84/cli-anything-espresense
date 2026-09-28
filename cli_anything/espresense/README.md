@@ -166,7 +166,22 @@ cli-anything-espresense companion config-push ./config.yaml --restart
 Local writes leave a timestamped `.bak` beside the file, just like in-pod
 writes do. `--file` works on **every** config-reading or config-editing
 command: all of `rooms`, all of `floors`, the config-side `nodes` and `devices`
-commands, all of `settings`, and `config doctor`.
+commands, all of `settings`, `config doctor` and `config diff`.
+
+### Verify the push landed (`config diff`)
+
+The companion reloads config.yaml only on start, so a push without
+`--restart` leaves it silently running the old config — the room you added
+never appears. `config diff` compares the companion's running view
+(`GET /api/state/config`) with the deployed file and reports every difference
+as a dotted path. `--against <file>` swaps the companion side for another
+local file, so two drafts can be compared offline. Secrets are redacted, and
+it exits 1 when differences exist so it can gate a restart:
+
+```bash
+cli-anything-espresense config diff \
+  || cli-anything-espresense companion restart
+```
 
 ### Validate the config
 
@@ -320,7 +335,7 @@ cli-anything-espresense node config-delete 10.32.101.32 apple:1005:9-12
 | `history heatmap` | Fleet-level room usage: folds every tracked device's history into one table per room — points, visits (re-entries count), dwell seconds (visit spans, a lower bound) and the devices that visited, sorted most-used first. `--device` narrows to specific devices |
 | `mqtt set-node / set-device / set-global / pub / watch` | Raw MQTT pub/sub |
 | `mqtt distances / node-status / telemetry` | Aggregated live snapshots: node→device distances, node online/offline status, node health (uptime / free memory / RSSI / version) |
-| `config show / save / doctor` | Local connection profile + config.yaml validation |
+| `config show / save / doctor / diff` | Local connection profile + config.yaml validation; `diff` compares the companion's running config against the deployed file and reports the drift as dotted paths (exits 1 on differences) |
 | `repl` | Interactive shell (default if no subcommand) |
 
 `nodes delete` clears the companion's runtime settings for a node;
@@ -341,7 +356,7 @@ cli_anything/espresense/
 │   ├── geometry.py          # pure polygon / bounds maths (no I/O)
 │   ├── floors.py            # floor CRUD, retag, bounds fitting
 │   ├── validate.py          # config.yaml consistency checks (`config doctor`)
-│   ├── config_yaml.py       # fetch / push YAML via kubectl
+│   ├── config_yaml.py       # fetch / push YAML via kubectl; diff_configs (pure semantic diff)
 │   ├── rooms.py             # polygon rename / rotate / geometry (with node fix-up)
 │   ├── nodes.py             # node config edits, placement + live-state merge
 │   ├── node_direct.py       # per-ESP HTTP client (firmware web server)

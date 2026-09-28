@@ -53,7 +53,7 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 | `calibration` | `get / summary / reset / auto-optimize` |
 | `history` | `get / trail / heatmap` — per-device position history, a movement summary (room segments per visit, first/last seen, rooms visited in order), and a fleet-level room-usage heatmap (points, visits, dwell seconds and devices per room, across all tracked devices) |
 | `mqtt` | `set-node / set-device / set-global / pub / watch / distances / node-status / telemetry` — raw MQTT pub/sub plus aggregated live snapshots (node→device distances, node online/offline, node health: uptime / free memory / RSSI / version) |
-| `config` | `show / save` (local connection profile) + `doctor` (validate config.yaml) |
+| `config` | `show / save` (local connection profile) + `doctor` (validate config.yaml) + `diff` (running-vs-deployed drift, exits 1 on differences) |
 | `repl` | Interactive shell (default with no subcommand) |
 
 All commands support `--json` for machine-readable output.
@@ -73,9 +73,9 @@ cli-anything-espresense companion config-push cfg.yaml --restart
 ```
 
 `--file` is available on **every** config-reading or config-editing command:
-all of `rooms`, all of `floors`, the config-side `nodes` commands and
-`config doctor`. Writes leave a timestamped `.bak` next to the file, exactly
-as the in-pod writes do.
+all of `rooms`, all of `floors`, the config-side `nodes` commands,
+`config doctor` and `config diff`. Writes leave a timestamped `.bak` next to
+the file, exactly as the in-pod writes do.
 
 ### `config doctor`
 
@@ -105,6 +105,31 @@ so it can gate a push:
 cli-anything-espresense config doctor --file cfg.yaml && \
   cli-anything-espresense companion config-push cfg.yaml --restart
 ```
+
+### `config diff`
+
+The companion reloads config.yaml **only on start**, so a push without
+`--restart` leaves it silently running the old config. `config diff` closes
+that gap: it compares the companion's running view (`GET /api/state/config`)
+with the deployed file — from the pod via kubectl, or from a local file with
+`--file` — and reports every difference as a dotted path
+(`rooms[0].points[1]`, `mqtt.timeout`, ...). `--against <file>` swaps the
+companion side for another local file, so two drafts can be compared offline.
+Secret leaves (`mqtt.password`, tokens) are redacted. Exits 1 when
+differences exist, so it can gate a restart:
+
+```bash
+$ cli-anything-espresense config diff
+left:  companion running config (GET /api/state/config)
+right: k8s://espresense/companion/config.yaml
+  ~ timeout: 30 -> 45
+  + floors[0].rooms[1] (only on the right)
+2 difference(s)
+```
+
+`+` lines are the smoking gun for a push the companion never picked up:
+present on disk, absent from the running view. A clean run prints
+`no differences` and exits 0.
 
 ### Floor-plan geometry
 
@@ -268,6 +293,9 @@ cli-anything-espresense companion stream --duration 30 --type deviceChanged
 # Room usage across the whole household (folds every tracked device's history)
 cli-anything-espresense history heatmap
 cli-anything-espresense history heatmap --device apple:1005:9-12 --limit 500
+
+# Did the last push actually land? (exits 1 while the companion runs stale config)
+cli-anything-espresense config diff || cli-anything-espresense companion restart
 ```
 
 ## Architecture
@@ -280,7 +308,7 @@ cli_anything/espresense/
 │   ├── config_source.py     # where config.yaml lives: pod (kubectl) or local file
 │   ├── validate.py          # config.yaml consistency checks (`config doctor`)
 │   ├── geometry.py          # pure polygon / bounds maths (no I/O)
-│   ├── config_yaml.py       # fetch / push YAML via kubectl
+│   ├── config_yaml.py       # fetch / push YAML via kubectl; diff_configs (pure semantic diff)
 │   ├── floors.py            # floor CRUD, retag, bounds fitting
 │   ├── rooms.py             # polygon rename / rotate / geometry (with node fix-up)
 │   ├── nodes.py             # node config edits, placement + live-state merge
@@ -312,14 +340,16 @@ the file on start, hence the `--restart` flag on every mutating command.
 python3 -m pytest cli_anything/espresense/tests/ -v
 ```
 
-1271 tests, 94% coverage — all against synthetic data on disk, no live
+1551 tests, 98.6% coverage — all against synthetic data on disk, no live
 broker, cluster or companion required. They cover the YAML round-trip, room
 rename + rotate (including atomic cycles and trailing-whitespace handling),
 the polygon/bounds maths (including the cases where two rooms must *not* be
 called overlapping), the config validator, the device registry and tuning-path
 editors (coercion, secret redaction, structural-path refusal), the per-node
-HTTP client, and full end-to-end CLI workflows driven through `--file` against
-a real config.yaml.
+HTTP client, MQTT aggregation (distances, node status, health telemetry),
+history analytics (trail, heatmap), running-vs-deployed config drift
+(`config diff`), and full end-to-end CLI workflows driven through `--file`
+against a real config.yaml.
 
 ## License
 

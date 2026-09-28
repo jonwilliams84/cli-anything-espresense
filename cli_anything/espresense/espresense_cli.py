@@ -308,6 +308,73 @@ def config_doctor(ctx, strict, config_file):
         sys.exit(1)
 
 
+@config.command("diff")
+@click.option(
+    "--against",
+    "against_file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Compare against this local YAML file instead of the companion's running config.",
+)
+@config_file_option
+@click.pass_context
+def config_diff(ctx, against_file, config_file):
+    """Show whether the companion is actually running the deployed config.yaml.
+
+    The companion reloads config.yaml only on start, so a push without
+    --restart leaves the two silently out of sync. This compares the
+    companion's running view (GET /api/state/config) with the deployed file
+    — from the pod via kubectl, or from a local file with --file. `--against
+    <file>` swaps the companion side for another local file, so two drafts
+    can be compared offline with no companion at all.
+
+    Exits 1 when differences exist, so it can gate a restart:
+
+      cli-anything-espresense config diff || cli-anything-espresense companion restart
+
+    Secret leaves (e.g. mqtt.password) are redacted in the output.
+    """
+    source = make_config_source(ctx, config_file)
+    _, deployed = source.fetch()
+    if against_file:
+        left = config_source_core.FileSource(path=Path(against_file)).fetch()[1]
+        left_label = f"file://{against_file}"
+    else:
+        client = make_client(ctx)
+        try:
+            left = companion_api.get_config(client)
+        except CompanionError as exc:
+            _abort(f"cannot read the companion's running config: {exc}")
+            return
+        left_label = "companion running config (GET /api/state/config)"
+    report = config_core.diff_configs(left, deployed)
+    out = {
+        "identical": report["identical"],
+        "difference_count": len(report["differences"]),
+        "differences": report["differences"],
+        "left": left_label,
+        "right": source.describe(),
+    }
+    if ctx.obj.get("as_json"):
+        emit(ctx, out)
+    else:
+        click.echo(f"left:  {left_label}")
+        click.echo(f"right: {source.describe()}")
+        if report["identical"]:
+            click.echo("no differences — the two configs match")
+        else:
+            for d in report["differences"]:
+                if d["kind"] == "changed":
+                    click.echo(f"  ~ {d['path']}: {json.dumps(d['old'])} -> {json.dumps(d['new'])}")
+                elif d["kind"] == "added":
+                    click.echo(f"  + {d['path']} (only on the right)")
+                else:
+                    click.echo(f"  - {d['path']} (only on the left)")
+            click.echo(f"{len(report['differences'])} difference(s)")
+    if not report["identical"]:
+        sys.exit(1)
+
+
 # ──────────────────────────────────────────────────────── companion
 
 

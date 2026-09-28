@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 from click.testing import CliRunner
 
 from cli_anything.espresense.espresense_cli import cli
+from cli_anything.espresense.utils import yaml_io
 
 # ── shared helpers ───────────────────────────────────────────────────────────
 
@@ -783,3 +784,244 @@ class TestRoomUsageWorkflow:
         # visit counts agree: d1 enters Kitchen twice
         assert by_room["Kitchen"]["visits"] == 2
         assert by_room["Office"]["visits"] == 2  # d1 once + d2 once
+
+
+# ── config diff (v0.9.0) ─────────────────────────────────────────────────────
+
+CONFIG_YAML_A = """\
+timeout: 30
+mqtt:
+  url: mqtt://broker:1883
+  password: hunter2
+floors:
+  - id: ground
+    name: Ground Floor
+    rooms:
+      - name: Kitchen
+        points: [[0,0],[4,0],[4,4],[0,4]]
+"""
+
+CONFIG_YAML_B = """\
+timeout: 45
+mqtt:
+  url: mqtt://broker:1883
+  password: hunter2
+floors:
+  - id: ground
+    name: Ground Floor
+    rooms:
+      - name: Kitchen
+        points: [[0,0],[4,0],[4,4],[0,4]]
+      - name: Hall
+        points: [[4,0],[8,0],[8,4],[4,4]]
+"""
+
+
+class TestConfigDiffE2E:
+    """`config diff` — did the companion actually pick up the deployed config?"""
+
+    def _run(self, tmp_path, monkeypatch, args, parsed, client=None, source_kind="k8s"):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        mock_source = MagicMock()
+        mock_source.fetch.return_value = ("raw", parsed)
+        mock_source.describe.return_value = f"{source_kind}://deployed/config.yaml"
+        needs_client = "--against" not in args and client is not None
+        with patch(
+            "cli_anything.espresense.espresense_cli.make_config_source",
+            return_value=mock_source,
+        ):
+            if needs_client:
+                with patch(
+                    "cli_anything.espresense.espresense_cli.make_client", return_value=client
+                ):
+                    return CliRunner().invoke(cli, ["--config", str(cfg), *args])
+            return CliRunner().invoke(cli, ["--config", str(cfg), *args])
+
+    def test_json_identical_when_companion_runs_the_deployed_config(self, tmp_path, monkeypatch):
+        parsed = {"timeout": 30, "floors": [{"id": "ground"}]}
+        client = MagicMock()
+        client.get.return_value = parsed
+        result = self._run(tmp_path, monkeypatch, ["--json", "config", "diff"], parsed, client)
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["identical"] is True
+        assert out["difference_count"] == 0
+        assert out["differences"] == []
+        assert "left" in out and "right" in out
+
+    def test_json_reports_drift_and_exits_1(self, tmp_path, monkeypatch):
+        running = {"timeout": 30}
+        deployed = {"timeout": 45, "locators": {"nelder_mead": {"enabled": True}}}
+        client = MagicMock()
+        client.get.return_value = running
+        result = self._run(tmp_path, monkeypatch, ["--json", "config", "diff"], deployed, client)
+        assert result.exit_code == 1  # drift is gate-able, like `rooms overlaps`
+        out = json.loads(result.output)
+        assert out["identical"] is False
+        assert out["difference_count"] == 2
+        paths = {d["path"]: d["kind"] for d in out["differences"]}
+        assert paths == {"timeout": "changed", "locators": "added"}
+
+    def test_json_push_without_restart_is_detected_as_added(self, tmp_path, monkeypatch):
+        # the exact gotcha: config.yaml gained a room but the companion was
+        # never restarted, so its running view still lacks it
+        running = {"floors": [{"id": "ground", "rooms": [{"name": "Kitchen"}]}]}
+        deployed = {
+            "floors": [
+                {"id": "ground", "rooms": [{"name": "Kitchen"}, {"name": "Hall"}]},
+            ]
+        }
+        client = MagicMock()
+        client.get.return_value = running
+        result = self._run(tmp_path, monkeypatch, ["--json", "config", "diff"], deployed, client)
+        out = json.loads(result.output)
+        assert out["differences"] == [
+            {
+                "path": "floors[0].rooms[1]",
+                "kind": "added",
+                "old": None,
+                "new": {"name": "Hall"},
+            }
+        ]
+
+    def test_secrets_are_redacted_in_json_output(self, tmp_path, monkeypatch):
+        running = {"mqtt": {"password": "hunter2"}}
+        deployed = {"mqtt": {"password": "newpass"}}
+        client = MagicMock()
+        client.get.return_value = running
+        result = self._run(tmp_path, monkeypatch, ["--json", "config", "diff"], deployed, client)
+        out = json.loads(result.output)
+        diff = out["differences"][0]
+        assert diff["path"] == "mqtt.password"
+        assert diff["old"] == "***" and diff["new"] == "***"
+
+    def test_human_output_lists_differences(self, tmp_path, monkeypatch):
+        client = MagicMock()
+        client.get.return_value = {"timeout": 30}
+        result = self._run(tmp_path, monkeypatch, ["config", "diff"], {"timeout": 45}, client)
+        assert result.exit_code == 1
+        assert "left:" in result.output and "right:" in result.output
+        assert "~ timeout: 30 -> 45" in result.output
+        assert "1 difference(s)" in result.output
+
+    def test_human_output_identical_message(self, tmp_path, monkeypatch):
+        parsed = {"timeout": 30}
+        client = MagicMock()
+        client.get.return_value = parsed
+        result = self._run(tmp_path, monkeypatch, ["config", "diff"], parsed, client)
+        assert result.exit_code == 0
+        assert "no differences" in result.output
+
+    def test_offline_two_file_comparison_needs_no_companion(self, tmp_path, monkeypatch):
+        a = tmp_path / "draft.yaml"
+        b = tmp_path / "deployed.yaml"
+        a.write_text(CONFIG_YAML_A)
+        b.write_text(CONFIG_YAML_B)
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        mock_source = MagicMock()
+        mock_source.fetch.return_value = ("raw", yaml_io.load(CONFIG_YAML_B))
+        mock_source.describe.return_value = f"file://{b}"
+        with patch(
+            "cli_anything.espresense.espresense_cli.make_config_source",
+            return_value=mock_source,
+        ):
+            result = CliRunner().invoke(
+                cli,
+                ["--config", str(cfg), "--json", "config", "diff", "--against", str(a)],
+            )
+        assert result.exit_code == 1
+        out = json.loads(result.output)
+        assert out["left"] == f"file://{a}"
+        paths = {d["path"]: d["kind"] for d in out["differences"]}
+        assert paths == {
+            "timeout": "changed",
+            "floors[0].rooms[1]": "added",
+        }
+
+    def test_companion_unreachable_fails_cleanly(self, tmp_path, monkeypatch):
+        from cli_anything.espresense.utils.companion_client import CompanionError
+
+        client = MagicMock()
+        client.get.side_effect = CompanionError("connection refused")
+        result = self._run(tmp_path, monkeypatch, ["config", "diff"], {"timeout": 1}, client)
+        assert result.exit_code == 1
+        assert "cannot read the companion's running config" in result.output
+        assert "Traceback" not in result.output
+
+    def test_help_works(self):
+        result = CliRunner().invoke(cli, ["config", "diff", "--help"])
+        assert result.exit_code == 0
+        assert "--against" in result.output
+
+
+class TestConfigDiffWorkflow:
+    """`config diff` closes the push → verify loop.
+
+    An agent that pushes config.yaml must be able to prove the companion
+    picked it up: after a push with --restart the running view matches, and
+    after a push WITHOUT --restart it does not. Both stories must come from
+    the same command, and the drift report must agree with what `companion
+    config-get` shows.
+    """
+
+    NEW = {"timeout": 45, "rooms": [{"name": "Kitchen"}]}
+
+    def _invoke(self, tmp_path, monkeypatch, running, deployed, extra=()):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        mock_source = MagicMock()
+        mock_source.fetch.return_value = ("raw", deployed)
+        mock_source.describe.return_value = "k8s://espresense/companion/config.yaml"
+        client = MagicMock()
+        client.get.return_value = running
+        with (
+            patch(
+                "cli_anything.espresense.espresense_cli.make_config_source",
+                return_value=mock_source,
+            ),
+            patch("cli_anything.espresense.espresense_cli.make_client", return_value=client),
+        ):
+            return CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "config", "diff", *extra]
+            )
+
+    def test_after_push_with_restart_the_views_match(self, tmp_path, monkeypatch):
+        result = self._invoke(tmp_path, monkeypatch, self.NEW, self.NEW)
+        assert result.exit_code == 0
+        assert json.loads(result.output)["identical"] is True
+
+    def test_after_push_without_restart_drift_is_reported(self, tmp_path, monkeypatch):
+        result = self._invoke(tmp_path, monkeypatch, {"timeout": 30}, self.NEW)
+        assert result.exit_code == 1
+        out = json.loads(result.output)
+        assert out["identical"] is False
+        assert {d["path"] for d in out["differences"]} == {"timeout", "rooms"}
+
+    def test_companion_config_get_tells_the_same_story_as_the_diff(self, tmp_path, monkeypatch):
+        """The diff's left side IS `companion config-get`'s payload."""
+        running = {"timeout": 30}
+        deployed = {"timeout": 45}
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        client = MagicMock()
+        client.get.return_value = running
+        mock_source = MagicMock()
+        mock_source.fetch.return_value = ("raw", deployed)
+        mock_source.describe.return_value = "k8s://espresense/companion/config.yaml"
+        with (
+            patch("cli_anything.espresense.espresense_cli.make_client", return_value=client),
+            patch(
+                "cli_anything.espresense.espresense_cli.make_config_source",
+                return_value=mock_source,
+            ),
+        ):
+            diff = CliRunner().invoke(cli, ["--config", str(cfg), "--json", "config", "diff"])
+            config_get = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "companion", "config-get"]
+            )
+        assert diff.exit_code == 1
+        assert config_get.exit_code == 0
+        assert json.loads(config_get.output) == running
+        assert json.loads(diff.output)["differences"][0]["old"] == running["timeout"]

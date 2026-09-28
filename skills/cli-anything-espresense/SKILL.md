@@ -79,7 +79,7 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on` |
 | `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50`, `history trail <device-id>` (movement summary: room segments per visit, first/last seen, rooms visited), `history heatmap [--device <id>]... [--limit N]` (room usage across all tracked devices: points, visits, dwell seconds, devices per room, most-used first) |
 | `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt node-status` (online/offline), `mqtt telemetry [--node <id>]` (node health snapshot: uptime, free memory, RSSI, version) |
-| `config` | `config show`, `config save`, `config doctor --file cfg.yaml` |
+| `config` | `config show`, `config save`, `config doctor --file cfg.yaml`, `config diff [--against draft.yaml] [--file cfg.yaml]` (running-vs-deployed drift, exits 1 on differences) |
 | `repl` | Interactive shell (default with no subcommand) |
 
 ## Agent guidance
@@ -151,6 +151,20 @@ cli-anything-espresense companion config-push cfg.yaml --restart
 Local writes leave a `.bak` beside the file too. `--restart` is meaningless
 for a local file, so it is reported back as `restart_skipped` rather than
 silently ignored.
+
+**After any push, verify the companion picked it up.** The companion reloads
+config.yaml only on start, so a push without `--restart` leaves it silently
+running the old config. `config diff` compares the running view
+(`GET /api/state/config`) with the deployed file — pod via kubectl, or a
+local file via `--file`; `--against <file>` compares two local files offline.
+Differences are dotted paths (`rooms[0].points[1]`), `+` lines mean "on disk
+but the companion never saw it", secrets are redacted, and it **exits 1 on
+drift** so an agent can gate on it:
+
+```bash
+cli-anything-espresense --json config diff \
+  || cli-anything-espresense companion restart
+```
 
 **`config doctor` is the first thing to run** when a user reports a node in
 the wrong room, a device not being located, or a room missing from Home
