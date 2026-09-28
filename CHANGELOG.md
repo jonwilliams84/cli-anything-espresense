@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.9.0] — 2026-09-28
+
+- `config diff` — proof that the companion is actually running the deployed
+  config.yaml. The harness's #1 gotcha has always been that the companion
+  reloads config.yaml only on start, so `companion config-push` without
+  `--restart` silently leaves it running the old config — and until now the
+  only way to notice was devices behaving oddly. `config diff` compares the
+  companion's running view (`GET /api/state/config`) with the deployed file
+  — from the pod via kubectl, or from a local file with `--file` — and
+  reports every difference as a dotted path (`mqtt.timeout`, `rooms[0].points[1]`,
+  ...). `+` lines are the smoking gun for a push the companion never picked
+  up: present on disk, absent from the running view. `--against <file>`
+  swaps the companion side for another local file, so two drafts can be
+  compared offline with no companion, no kubectl, no cluster. Secret leaves
+  (`mqtt.password`, tokens — anything matching `settings.SECRET_HINTS`) are
+  redacted on both sides, because this output lands in transcripts. Exits 1
+  when differences exist, so it gates a restart:
+  `cli-anything-espresense config diff || cli-anything-espresense companion restart`.
+- New pure `core/config_yaml.diff_configs(a, b, redact_secrets=True)`: dicts
+  recurse by key, lists recurse positionally (`[i]` paths) so a reordered
+  list reports per-element changes — honest, and documented as slightly
+  noisy. `a` is the running/against side, `b` the on-disk side, so
+  "pushed but not picked up" reads as `kind: added`. It works on plain
+  dicts and on ruamel's CommentedMap/CommentedSeq alike, and is pure —
+  the CLI command owns all transport.
+- `config doctor` validates ONE config structurally; `config diff` compares
+  TWO configs against each other. They compose: `doctor --file` gates a
+  push, `diff` then verifies the push landed.
+- Unit-tested in `test_core.py` (`TestConfigDiff`: empty/identical docs,
+  scalar and nested changes, added/removed keys, list element and length
+  changes, container-type changes, secret redaction including list-index
+  paths, `redact_secrets=False`, ruamel documents); CLI behaviour pinned in
+  `test_full_e2e.py` (`TestConfigDiffE2E`: identical JSON, drift + exit 1,
+  push-without-restart detected as `added`, redaction in JSON, human
+  output lines, offline `--against` file-vs-file, companion-unreachable
+  abort without traceback, `--help`) and a cross-command workflow in
+  `TestConfigDiffWorkflow` asserting that a push with `--restart` yields an
+  identical report, a push without one reports drift, and `config diff`'s
+  left side is exactly what `companion config-get` returns.
+- Docs updated: both READMEs, both SKILL.md copies (kept byte-identical),
+  TEST.md, CLAUDE.md.
+
 ## [0.8.0] — 2026-09-19
 
 - `history heatmap` — fleet-level room-usage analytics. `history trail`
