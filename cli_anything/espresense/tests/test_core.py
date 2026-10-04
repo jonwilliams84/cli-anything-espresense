@@ -6,11 +6,14 @@ network, no kubectl, no MQTT broker required.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from unittest.mock import MagicMock, patch
 
 from cli_anything.espresense.core import (
+    calibration as calibration_core,
     config_yaml as config_yaml_core,
     global_settings as global_settings_core,
     history as history_core,
@@ -20,6 +23,7 @@ from cli_anything.espresense.core import (
     telemetry as telemetry_core,
 )
 from cli_anything.espresense.core import rooms as rooms_core
+from cli_anything.espresense.core.node_direct import NodeClient, NodeError
 from cli_anything.espresense.utils import yaml_io
 
 
@@ -1393,3 +1397,87 @@ class TestConfigDiff:
         b = yaml_io.load("timeout: 45\nfloors:\n  - id: ground\n")
         out = config_yaml_core.diff_configs(a, b)
         assert out["differences"] == [{"path": "timeout", "kind": "changed", "old": 30, "new": 45}]
+
+
+# ── calibration.compute_rssi_at_1m (v0.10.0) ─────────────────────────────────
+
+
+class TestComputeRssiAt1m:
+    def test_free_space_measurement_at_one_metre_is_identity(self):
+        # at d=1, log10(1)=0 — the measurement IS the rssi@1m
+        assert calibration_core.compute_rssi_at_1m(-59.0, 1.0) == -59.0
+
+    def test_formula_inverts_log_distance_model(self):
+        # -76.5 measured at 1.4 m with n=2: R1 = -76.5 + 20*log10(1.4) = -72.98
+        exact = calibration_core.compute_rssi_at_1m(-76.5, 1.4)
+        assert abs(exact - (-76.5 + 20 * math.log10(1.4))) < 1e-9
+
+    def test_absorption_exponent_scales_the_correction(self):
+        near = calibration_core.compute_rssi_at_1m(-70, 1.5, absorption=2.0)
+        far = calibration_core.compute_rssi_at_1m(-70, 1.5, absorption=3.0)
+        # stronger absorption => a reading at >1m implies a HIGHER rssi@1m
+        assert far > near
+
+    def test_reading_within_one_metre_implies_below_the_measurement(self):
+        # log10(0.5) < 0, so the correction subtracts
+        assert calibration_core.compute_rssi_at_1m(-60, 0.5) < -60
+
+    def test_zero_distance_raises_value_error(self):
+        with pytest.raises(ValueError, match="distance"):
+            calibration_core.compute_rssi_at_1m(-60, 0)
+
+    def test_zero_absorption_raises_value_error(self):
+        with pytest.raises(ValueError, match="absorption"):
+            calibration_core.compute_rssi_at_1m(-60, 1.0, absorption=0)
+
+    def test_accepts_and_returns_floats_from_strings(self):
+        # the CLI passes click-validated floats; accept the str() spelling too
+        assert calibration_core.compute_rssi_at_1m("-59", "1.0") == -59.0
+
+
+# ── node_direct.calibrate (v0.10.0) ──────────────────────────────────────────
+
+
+class TestNodeCalibrate:
+    def test_sends_name_and_distance_params(self):
+        c = NodeClient("host")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json = MagicMock(return_value={"rssi@1m": -58})
+        with patch.object(c.session, "request", return_value=mock_resp) as mock_req:
+            result = c.calibrate("apple:1005:9-12", 1.4)
+        assert result == {"rssi@1m": -58}
+        assert mock_req.call_args[1]["params"] == {
+            "name": "apple:1005:9-12",
+            "distance": 1.4,
+        }
+        assert mock_req.call_args[0][0] == "GET"
+        assert mock_req.call_args[0][1].endswith("/calibrate")
+
+    def test_http_error_raises_node_error(self):
+        c = NodeClient("host")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.text = "boom"
+        with patch.object(c.session, "request", return_value=mock_resp):
+            with pytest.raises(NodeError, match="500"):
+                c.calibrate("phone", 1.0)
+
+    def test_bad_json_falls_back_to_raw_text(self):
+        c = NodeClient("host")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json = MagicMock(side_effect=ValueError("bad json"))
+        mock_resp.text = "ok"
+        with patch.object(c.session, "request", return_value=mock_resp):
+            assert c.calibrate("phone", 1.0) == {"raw": "ok"}
+
+    def test_zero_distance_raises_value_error(self):
+        c = NodeClient("host")
+        with pytest.raises(ValueError, match="distance"):
+            c.calibrate("phone", 0)
+
+    def test_empty_name_raises_value_error(self):
+        c = NodeClient("host")
+        with pytest.raises(ValueError, match="name"):
+            c.calibrate("", 1.0)

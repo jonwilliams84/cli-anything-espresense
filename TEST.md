@@ -4,14 +4,14 @@ The suite runs against synthetic data on disk — no live companion, cluster,
 broker or node is ever contacted.
 
 ```bash
-python3 -m pytest cli_anything/espresense/tests/ -v          # 1551 tests
+python3 -m pytest cli_anything/espresense/tests/ -v          # 1573 tests
 python3 -m pytest cli_anything/espresense/tests/ \
   --cov=cli_anything --cov-fail-under=90 -q                  # CI gate shape
 ruff check cli_anything/ && ruff format --check cli_anything/
 bandit -r cli_anything/ -ll -x '*/tests/*,*/test_*.py,*/conftest.py'
 ```
 
-Current state: **1551 tests, all four gates green (coverage 98.64%).**
+Current state: **1573 tests, all four gates green (coverage 98.66%).**
 
 ## What is covered where
 
@@ -30,6 +30,7 @@ Current state: **1551 tests, all four gates green (coverage 98.64%).**
 | **Node health snapshots (`mqtt telemetry`)** | `test_core.py` (`TestParseTelemetryPayload`, `TestAggregateNodeTelemetry`, `TestTelemetryRows`, `TestTelemetrySnapshot`) | `test_full_e2e.py` (`TestMqttTelemetryE2E`, `TestNodeHealthWorkflow`) |
 | **Fleet room-usage analytics (`history heatmap`)** | `test_core.py` (`TestHistoryHeatmap`) | `test_full_e2e.py` (`TestHistoryHeatmapE2E`, `TestRoomUsageWorkflow`) |
 | **Config drift detection (`config diff` running vs deployed)** | `test_core.py` (`TestConfigDiff`: scalar/nested/list diffs, index paths, secret redaction incl. list-index paths, ruamel documents) | `test_full_e2e.py` (`TestConfigDiffE2E`: identical, drift + exit 1, push-without-restart `added`, redaction, human lines, `--against` offline file-vs-file, companion-unreachable abort, `--help`; `TestConfigDiffWorkflow`: push-with-restart matches, push-without-restart drifts, `companion config-get` tells the same story) |
+| **Device distance calibration (`node calibrate`, `calibration compute`)** | `test_core.py` (`TestComputeRssiAt1m`: identity at 1 m, formula inversion, absorption scaling, sub-metre readings, ValueError guards, string inputs; `TestNodeCalibrate`: request params, HTTP error → `NodeError`, bad-JSON fallback, guards) | `test_full_e2e.py` (`TestNodeCalibrateE2E`: JSON parse, positive-distance guard, clean `NodeError` abort, `--help`; `TestCalibrationComputeE2E`: JSON shape, negative RSSI positional via `COORD_SETTINGS`, custom `--absorption`, zero-distance abort, `--help`; `TestCalibrationWorkflow`: calibrate → compute → `node config-set --rssi-at-1m`, identity at 1 m) |
 | Docs stay in sync with the CLI | `test_docs_sync.py` | — |
 | REPL loop, prompt-toolkit skin, stream/watch edge cases, direct-node group, remaining CLI error/no-op branches | `test_refine_hardening.py` | — |
 | CLI error-path contract (`_abort`: stderr + exit 1, no traceback) and last core gaps (calibration wrappers, `FileSource` backup failure, kubectl-missing, node-direct HTTP errors, rotate validation, transport wrapping, `python -m` entry) | `test_error_paths.py` | — |

@@ -72,11 +72,11 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `rooms` (geometry) | `rooms geometry`, `rooms locate 5 1`, `rooms overlaps`, `rooms set-points Office --point 0,0 --point 5,0 --point 5,4 --point 0,4`, `rooms move Office 1 -2`, `rooms scale Office 1.1`, `rooms set-color Office '#a3c9f9'` |
 | `floors` | `floors list`, `floors show gf`, `floors add bs --name "Basement" --bounds "0,0,0 6,4,2.4"`, `floors rename bs "Cellar"`, `floors retag bs basement`, `floors set-bounds gf 0,0,0 10,8,2.4`, `floors fit-bounds gf --margin 0.25`, `floors delete bs --force` |
 | `nodes` | `nodes list`, `nodes show <id>`, `nodes add <name> --room "Office" --point 1,2,3`, `nodes place <name> --room "Office"`, `nodes remove-from-config <name>`, `nodes rename-in-config <old> <new>`, `nodes set-point <name> X Y Z`, `nodes restart <id>`, `nodes delete <id>`, `nodes update-firmware <id> <url>`, `nodes put-settings <id> '{"calibration":{"absorption":2.8}}'` |
-| `node` | `node info <ip>`, `node restart <ip>`, `node reboot <ip>`, `node settings <ip> --section extras`, `node set <ip> absorption=2.8`, `node rename <ip> <new-name>`, `node devices <ip>`, `node config-list <ip>`, `node config-set <ip> <device-id> --name X --rssi-at-1m -59`, `node config-delete <ip> <device-id>` |
+| `node` | `node info <ip>`, `node restart <ip>`, `node reboot <ip>`, `node settings <ip> --section extras`, `node set <ip> absorption=2.8`, `node rename <ip> <new-name>`, `node devices <ip>`, `node config-list <ip>`, `node config-set <ip> <device-id> --name X --rssi-at-1m -59`, `node config-delete <ip> <device-id>`, `node calibrate <ip> <device-id> <metres>` (firmware calibration flow: device held at a known distance) |
 | `devices` (runtime) | `devices list`, `devices show <id>`, `devices set <id> --name "Jon Phone" --ref-rssi -59`, `devices delete <id>`, `devices whereis <id>` (last known position), `devices occupancy [--floor <floor>]` (who is in which room) |
 | `devices` (config.yaml) | `devices list-in-config`, `devices show-in-config <id>`, `devices add-to-config 'irk:abc' --name "Jon Phone" --rssi-at-1m -65`, `devices update-in-config 'irk:abc' --rssi-at-1m -61`, `devices remove-from-config 'irk:abc'` |
 | `settings` | `settings show`, `settings show --section mqtt`, `settings get locators.nelder_mead.enabled`, `settings set away_timeout 300`, `settings unset weighting.algorithm`, `settings locators`, `settings locator nadaraya_watson off`, `settings optimizers`, `settings optimizer absorption off` |
-| `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on` |
+| `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on`, `calibration compute <rssi> <metres> [--absorption N]` (pure maths: a reading taken at a known distance → the `rssi@1m` config value; RSSI is signed, pass it like coordinates) |
 | `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50`, `history trail <device-id>` (movement summary: room segments per visit, first/last seen, rooms visited), `history heatmap [--device <id>]... [--limit N]` (room usage across all tracked devices: points, visits, dwell seconds, devices per room, most-used first) |
 | `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt node-status` (online/offline), `mqtt telemetry [--node <id>]` (node health snapshot: uptime, free memory, RSSI, version) |
 | `config` | `config show`, `config save`, `config doctor --file cfg.yaml`, `config diff [--against draft.yaml] [--file cfg.yaml]` (running-vs-deployed drift, exits 1 on differences) |
@@ -113,6 +113,17 @@ rooms swap names without a collision.
 **Renaming a physical node** (`node rename <ip> <name>`) sets the firmware's
 `room` setting and triggers a restart. The node's hostname will then be
 `espresense-<kebab-of-new-name>`. Expect ~30–60s offline.
+
+**Calibrating a device's rssi@1m** has two routes to one number and one
+durable sink. `node calibrate <ip> <device-id> <metres>` reuses the
+firmware's own calibration flow (GET `/calibrate`) — hold the device at a
+known distance while the node recomputes from its current reading; the
+result lives in node state only. `calibration compute <rssi> <metres>` is
+pure maths (no node needed): it inverts the firmware's log-distance model,
+`rssi@1m = rssi + 10·n·log10(d)`, for a reading you took at a known
+distance (`--absorption` is the exponent n, default 2.0). Persist a value
+you trust with `node config-set --rssi-at-1m` or
+`devices add-to-config --rssi-at-1m`.
 
 **MQTT setting publishes** target `espresense/rooms/<node_id>/<key>/set` and
 are retained by default — the node applies the new value on next message
