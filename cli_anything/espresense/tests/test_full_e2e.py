@@ -1025,3 +1025,203 @@ class TestConfigDiffWorkflow:
         assert config_get.exit_code == 0
         assert json.loads(config_get.output) == running
         assert json.loads(diff.output)["differences"][0]["old"] == running["timeout"]
+
+
+# ── node calibrate (v0.10.0) ─────────────────────────────────────────────────
+
+
+class TestNodeCalibrateE2E:
+    def _invoke(self, ctx_node, args):
+        runner = CliRunner()
+        with ctx_node as mock_node:
+            return mock_node, runner.invoke(cli, args)
+
+    def test_json_output_parses_and_hits_the_firmware_endpoint(self, tmp_path):
+        from cli_anything.espresense import espresense_cli as cli_mod
+
+        cfg = _cfg(tmp_path)
+        mock_node = MagicMock()
+        mock_node.calibrate.return_value = {"rssi@1m": -58}
+        with patch.object(cli_mod, "_node_client", return_value=mock_node):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--config",
+                    str(cfg),
+                    "--json",
+                    "node",
+                    "calibrate",
+                    "10.0.0.5",
+                    "apple:1005:9-12",
+                    "1.4",
+                ],
+            )
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["host"] == "10.0.0.5"
+        assert out["name"] == "apple:1005:9-12"
+        assert out["distance"] == 1.4
+        assert out["result"] == {"rssi@1m": -58}
+        mock_node.calibrate.assert_called_once_with("apple:1005:9-12", 1.4)
+
+    def test_non_positive_distance_aborts_without_touching_the_node(self, tmp_path):
+        from cli_anything.espresense import espresense_cli as cli_mod
+
+        cfg = _cfg(tmp_path)
+        mock_node = MagicMock()
+        with patch.object(cli_mod, "_node_client", return_value=mock_node):
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "node", "calibrate", "10.0.0.5", "phone", "0"]
+            )
+        assert result.exit_code == 1
+        assert "distance must be > 0" in result.output
+        mock_node.calibrate.assert_not_called()
+
+    def test_node_error_aborts_with_message_not_traceback(self, tmp_path):
+        from cli_anything.espresense import espresense_cli as cli_mod
+        from cli_anything.espresense.core.node_direct import NodeError
+
+        cfg = _cfg(tmp_path)
+        mock_node = MagicMock()
+        mock_node.calibrate.side_effect = NodeError("GET /calibrate -> 500: boom")
+        with patch.object(cli_mod, "_node_client", return_value=mock_node):
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "node", "calibrate", "10.0.0.5", "phone", "2.0"]
+            )
+        assert result.exit_code == 1
+        assert "GET /calibrate -> 500" in result.output
+        assert not isinstance(result.exception, TypeError)  # clean abort, not a crash
+
+    def test_help_is_available(self, tmp_path):
+        ctx = _cfg(tmp_path)
+        result = CliRunner().invoke(cli, ["--config", str(ctx), "node", "calibrate", "--help"])
+        assert result.exit_code == 0
+        assert "DISTANCE" in result.output
+        assert "rssi@1m" in result.output
+
+
+class TestCalibrationComputeE2E:
+    def test_json_output_has_the_config_value(self, tmp_path):
+        import math
+
+        cfg = _cfg(tmp_path)
+        result = CliRunner().invoke(
+            cli, ["--config", str(cfg), "--json", "calibration", "compute", "-76.5", "1.4"]
+        )
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        exact = -76.5 + 20 * math.log10(1.4)
+        assert out["rssi_measured"] == -76.5
+        assert out["distance"] == 1.4
+        assert out["absorption"] == 2.0
+        assert abs(out["exact"] - round(exact, 2)) < 1e-9
+        assert out["rssi_at_1m"] == round(exact)
+
+    def test_negative_rssi_positional_is_accepted(self, tmp_path):
+        # the whole calibration surface takes signed numbers as positionals;
+        # COORD_SETTINGS must keep click from eating '-76.5' as an option
+        cfg = _cfg(tmp_path)
+        result = CliRunner().invoke(
+            cli, ["--config", str(cfg), "calibration", "compute", "-76.5", "1.4"]
+        )
+        assert result.exit_code == 0
+        assert "rssi_at_1m" in result.output
+
+    def test_custom_absorption_is_visible_in_json(self, tmp_path):
+        import math
+
+        cfg = _cfg(tmp_path)
+        result = CliRunner().invoke(
+            cli,
+            [
+                "--config",
+                str(cfg),
+                "--json",
+                "calibration",
+                "compute",
+                "-76.5",
+                "1.4",
+                "--absorption",
+                "2.2",
+            ],
+        )
+        out = json.loads(result.output)
+        assert out["absorption"] == 2.2
+        assert out["rssi_at_1m"] == round(-76.5 + 22 * math.log10(1.4))
+
+    def test_zero_distance_aborts(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        result = CliRunner().invoke(
+            cli, ["--config", str(cfg), "calibration", "compute", "-76.5", "0"]
+        )
+        assert result.exit_code == 1
+        assert "distance must be > 0" in result.output
+
+    def test_help_is_available(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        result = CliRunner().invoke(cli, ["--config", str(cfg), "calibration", "compute", "--help"])
+        assert result.exit_code == 0
+        assert "--absorption" in result.output
+
+
+class TestCalibrationWorkflow:
+    """Measure → calibrate → persist: the three commands must line up.
+
+    `node calibrate` (firmware endpoint) and `calibration compute` (pure
+    formula) are two ways to the same number; both feed the same durable
+    sink, `node config-set --rssi-at-1m`. The workflow pins that the value
+    `compute` emits is exactly what you'd pass to `node config-set`.
+    """
+
+    def test_compute_value_feeds_node_config_set(self, tmp_path):
+        from cli_anything.espresense import espresense_cli as cli_mod
+
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        mock_node = MagicMock()
+        mock_node.calibrate.return_value = {"rssi@1m": -73}
+        with patch.object(cli_mod, "_node_client", return_value=mock_node):
+            cal = CliRunner().invoke(
+                cli,
+                [
+                    "--config",
+                    str(cfg),
+                    "--json",
+                    "node",
+                    "calibrate",
+                    "10.0.0.5",
+                    "apple:1005:9-12",
+                    "1.4",
+                ],
+            )
+            assert cal.exit_code == 0
+            firmware_value = json.loads(cal.output)["result"]["rssi@1m"]
+
+            computed = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "calibration", "compute", "-76.7", "1.4"]
+            )
+            assert computed.exit_code == 0
+            rssi_at_1m = json.loads(computed.output)["rssi_at_1m"]
+
+            persisted = CliRunner().invoke(
+                cli,
+                [
+                    "--config",
+                    str(cfg),
+                    "node",
+                    "config-set",
+                    "10.0.0.5",
+                    "apple:1005:9-12",
+                    "--rssi-at-1m",
+                    str(rssi_at_1m),
+                ],
+            )
+        assert persisted.exit_code == 0
+        mock_node.upsert_device_config.assert_called_once_with(
+            "apple:1005:9-12", alias=None, name=None, rssi_at_1m=rssi_at_1m
+        )
+        # identity at 1 m: computing from a -73 reading at exactly 1 m rounds to -73
+        one_metre = CliRunner().invoke(
+            cli,
+            ["--config", str(cfg), "--json", "calibration", "compute", str(firmware_value), "1"],
+        )
+        assert json.loads(one_metre.output)["rssi_at_1m"] == firmware_value

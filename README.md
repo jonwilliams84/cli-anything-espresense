@@ -48,9 +48,9 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 | `rooms` | `list / add / delete / rename / rotate / repoint-node / geometry / locate / overlaps / set-points / move / scale / set-color` — edit room polygons + node room references (atomic, supports cycles) and reason about their geometry |
 | `floors` | `list / show / add / rename / retag / set-bounds / fit-bounds / delete` — full floor CRUD in config.yaml |
 | `nodes` | `list / show / add / place / remove-from-config / rename-in-config / set-point / restart / delete / update-firmware / put-settings` — manage nodes from the companion side |
-| `node` | `info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete` — direct HTTP to one ESP firmware node |
+| `node` | `info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete / calibrate` — direct HTTP to one ESP firmware node, incl. the firmware's device distance calibration flow |
 | `devices` | `list / show / set / delete / whereis / occupancy` — tracked devices (phones, tags, beacons), incl. last-known position and live room occupancy |
-| `calibration` | `get / summary / reset / auto-optimize` |
+| `calibration` | `get / summary / reset / auto-optimize / compute` — calibration matrix + autocalibration, plus a pure `compute` command turning a measured RSSI at a known distance into the `rssi@1m` value config.yaml wants |
 | `history` | `get / trail / heatmap` — per-device position history, a movement summary (room segments per visit, first/last seen, rooms visited in order), and a fleet-level room-usage heatmap (points, visits, dwell seconds and devices per room, across all tracked devices) |
 | `mqtt` | `set-node / set-device / set-global / pub / watch / distances / node-status / telemetry` — raw MQTT pub/sub plus aggregated live snapshots (node→device distances, node online/offline, node health: uptime / free memory / RSSI / version) |
 | `config` | `show / save` (local connection profile) + `doctor` (validate config.yaml) + `diff` (running-vs-deployed drift, exits 1 on differences) |
@@ -340,7 +340,7 @@ the file on start, hence the `--restart` flag on every mutating command.
 python3 -m pytest cli_anything/espresense/tests/ -v
 ```
 
-1551 tests, 98.6% coverage — all against synthetic data on disk, no live
+1573 tests, 98.7% coverage — all against synthetic data on disk, no live
 broker, cluster or companion required. They cover the YAML round-trip, room
 rename + rotate (including atomic cycles and trailing-whitespace handling),
 the polygon/bounds maths (including the cases where two rooms must *not* be

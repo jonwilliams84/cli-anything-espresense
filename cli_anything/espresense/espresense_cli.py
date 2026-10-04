@@ -1571,6 +1571,31 @@ def node_config_delete(ctx, host, device_id):
     emit(ctx, {"host": host, "device_id": device_id, "deleted": ok})
 
 
+@node.command("calibrate")
+@click.argument("host")
+@click.argument("name")
+@click.argument("distance", type=float)
+@click.pass_context
+def node_calibrate(ctx, host, name, distance):
+    """Calibrate device NAME on this node: you measured DISTANCE metres.
+
+    Calls the firmware's GET /calibrate — the same flow as the calibration
+    button in the node's own web UI: with the device at a known distance,
+    the node recomputes that device's rssi@1m from its current reading.
+
+    The result lives in node state only. Persist what you read back there
+    (or compute the value with `calibration compute`) durably via
+    `node config-set --rssi-at-1m` or `devices add-to-config --rssi-at-1m`.
+    """
+    if distance <= 0:
+        _abort(f"distance must be > 0, got {distance}")
+    try:
+        result = _node_client(ctx, host).calibrate(name, distance)
+    except node_direct.NodeError as exc:
+        _abort(str(exc))
+    emit(ctx, {"host": host, "name": name, "distance": distance, "result": result})
+
+
 # ──────────────────────────────────────────────────────── devices (companion view)
 
 
@@ -2021,6 +2046,45 @@ def calibration_auto(ctx, state):
         emit(ctx, calibration_core.auto_optimize_get(client))
     else:
         emit(ctx, calibration_core.auto_optimize_set(client, state == "on"))
+
+
+@calibration.command("compute", context_settings=COORD_SETTINGS)
+@click.argument("rssi", type=float)
+@click.argument("distance", type=float)
+@click.option(
+    "--absorption",
+    default=2.0,
+    type=float,
+    show_default=True,
+    help="Path-loss exponent n (the firmware's `absorption` setting)",
+)
+@click.pass_context
+def calibration_compute(ctx, rssi, distance, absorption):
+    """Compute the rssi@1m value for a reading taken at a known distance.
+
+    Pure maths — no node, companion or broker needed. RSSI is typically
+    negative (hence signed coordinates-style parsing).
+
+    Example:
+      calibration compute -76.5 1.4 --absorption 2.2
+
+    Feeds `devices add-to-config --rssi-at-1m` / `node config-set
+    --rssi-at-1m`.
+    """
+    try:
+        exact = calibration_core.compute_rssi_at_1m(rssi, distance, absorption)
+    except ValueError as exc:
+        _abort(str(exc))
+    emit(
+        ctx,
+        {
+            "rssi_measured": rssi,
+            "distance": distance,
+            "absorption": absorption,
+            "exact": round(exact, 2),
+            "rssi_at_1m": round(exact),
+        },
+    )
 
 
 # ──────────────────────────────────────────────────────── history

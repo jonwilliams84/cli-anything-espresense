@@ -1,3 +1,3 @@
 """cli-anything-espresense — control ESPresense (companion + node firmware)."""
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"

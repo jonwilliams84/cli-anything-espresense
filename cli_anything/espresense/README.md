@@ -315,6 +315,32 @@ cli-anything-espresense node config-set 10.32.101.32 apple:1005:9-12 \
 cli-anything-espresense node config-delete 10.32.101.32 apple:1005:9-12
 ```
 
+### Calibrate one device's rssi@1m
+
+Two routes to the same number, one sink:
+
+```bash
+# route 1: the node firmware's own calibration flow — hold the device at a
+# known distance from the node and let the node do the maths
+cli-anything-espresense node calibrate 10.32.101.32 apple:1005:9-12 1.4
+
+# route 2: measured a reading yourself — compute rssi@1m from it (pure maths,
+# no node needed). RSSI is negative, so pass it signed like coordinates.
+cli-anything-espresense calibration compute -76.5 1.4 --absorption 2.2
+
+# both feed the same durable homes:
+cli-anything-espresense node config-set 10.32.101.32 apple:1005:9-12 --rssi-at-1m -73
+cli-anything-espresense devices add-to-config apple:1005:9-12 --rssi-at-1m -73 --file cfg.yaml
+```
+
+`node calibrate` reuses the firmware web UI's calibration flow (GET
+`/calibrate?name=…&distance=…`): the node recomputes that device's rssi@1m
+from its current reading. The result lives in node-state only — persist a
+value you trust via `node config-set --rssi-at-1m` or
+`devices add-to-config --rssi-at-1m`. `calibration compute` inverts the
+firmware's log-distance model (`rssi@1m = rssi + 10·n·log10(d)`, where `n`
+is the `absorption` setting) for a reading you took at a known distance.
+
 ## Commands
 
 | Group | Purpose |
@@ -324,13 +350,13 @@ cli-anything-espresense node config-delete 10.32.101.32 apple:1005:9-12
 | `rooms geometry / locate / overlaps / set-points / move / scale / set-color` | Measure and reshape room polygons |
 | `floors list / show / add / rename / retag / set-bounds / fit-bounds / delete` | Full floor CRUD in config.yaml |
 | `nodes list / show / add / place / remove-from-config / rename-in-config / set-point / restart / delete / update-firmware / put-settings` | Manage nodes from the companion side |
-| `node info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete` | Direct HTTP to one ESP node |
+| `node info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete / calibrate` | Direct HTTP to one ESP node, incl. device distance calibration |
 | `devices list / show / set / delete` | Tracked devices, companion runtime view (phones, tags, beacons) |
 | `devices whereis / occupancy` | Live presence queries: last known position of one device; who is in which room right now |
 | `devices list-in-config / show-in-config / add-to-config / update-in-config / remove-from-config` | The durable `devices:` block of config.yaml |
 | `settings show / get / set / unset / locators / locator / optimizers / optimizer` | Tuning half of config.yaml: timeouts, mqtt, gps, locators, optimizers |
 | `companion settings-keys / settings-get / settings-set` + `mqtt set-global` | Global settings *outside* config.yaml (`/api/settings`, mirrored on MQTT) |
-| `calibration get / summary / reset / auto-optimize` | Calibration matrix + autocalibration |
+| `calibration get / summary / reset / auto-optimize / compute` | Calibration matrix + autocalibration; `compute` turns a measured reading + known distance into an rssi@1m config value (pure maths, no transport) |
 | `history get / trail` | Per-device position history; `trail` folds it into a movement summary (consecutive room segments per visit, first/last seen, rooms visited in order) |
 | `history heatmap` | Fleet-level room usage: folds every tracked device's history into one table per room — points, visits (re-entries count), dwell seconds (visit spans, a lower bound) and the devices that visited, sorted most-used first. `--device` narrows to specific devices |
 | `mqtt set-node / set-device / set-global / pub / watch` | Raw MQTT pub/sub |

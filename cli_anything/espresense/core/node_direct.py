@@ -15,6 +15,10 @@ HeadlessWiFiSettings library):
   GET  /wifi/hardware              — sensor settings
   POST /wifi/hardware              — write same
   GET  /wifi/scan                  — list visible APs
+  GET  /calibrate?name=<id>&distance=<m>
+                                   — you measured `distance` metres to `name`;
+                                     the firmware recomputes that device's
+                                     rssi@1m from its current reading
 
 Settings forms always trigger a node restart after POST, so callers should
 expect the node to drop offline briefly.
@@ -169,3 +173,27 @@ class NodeClient:
         except ValueError:
             return [{"raw": resp.text}]
         return data if isinstance(data, list) else [data]
+
+    # ── calibration ─────────────────────────────────────────────────────────
+
+    def calibrate(self, name: str, distance: float) -> dict:
+        """GET /calibrate — calibrate device `name` against a known distance.
+
+        The firmware web UI's calibration button: you stand where you know the
+        true distance to the device and tell the node; it recomputes the
+        device's rssi@1m from its *current* signal reading and that distance.
+        The new value only lives in the node's runtime/device-config — write it
+        somewhere durable (`node config-set --rssi-at-1m` or
+        `devices add-to-config --rssi-at-1m`) afterwards if it looks right.
+        """
+        if not name:
+            raise ValueError("name must be non-empty")
+        if distance <= 0:
+            raise ValueError("distance must be > 0")
+        resp = self._request("GET", "/calibrate", params={"name": name, "distance": distance})
+        if resp.status_code >= 400:
+            raise NodeError(f"GET /calibrate -> {resp.status_code}: {resp.text[:200]}")
+        try:
+            return resp.json()
+        except ValueError:
+            return {"raw": resp.text}

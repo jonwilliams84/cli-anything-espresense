@@ -9,14 +9,14 @@ Python Click CLI + REPL for operating an ESPresense deployment from the terminal
   - `espresense_cli.py` — Click CLI + REPL (all command groups)
   - `core/` — one module per concern: `companion_api.py`, `config_source.py`, `config_yaml.py`, `validate.py`, `geometry.py`, `floors.py`, `rooms.py`, `nodes.py`, `node_direct.py`, `devices.py`, `config_devices.py`, `settings.py`, `global_settings.py`, `calibration.py`, `history.py`, `telemetry.py`, `stream.py`, `mqtt.py`, `k8s_backend.py`, `project.py`
   - `utils/` — `companion_client.py` (requests Session), `yaml_io.py` (ruamel round-trip), `repl_skin.py`
-  - `tests/` — 1551 tests, synthetic data, no live services
+  - `tests/` — 1573 tests, synthetic data, no live services
 - `setup.py` reads `cli_anything/espresense/README.md` (NOT the repo-root README) as long_description — keep that file present.
 - Skill manifest is duplicated at `skills/cli-anything-espresense/SKILL.md` and `cli_anything/espresense/skills/SKILL.md`.
 
 ## Commands
 ```bash
 pip install -e .                                          # install
-python3 -m pytest cli_anything/espresense/tests/ -v       # test (1551 tests)
+python3 -m pytest cli_anything/espresense/tests/ -v       # test (1573 tests)
 ruff check cli_anything/ && ruff format --check cli_anything/   # lint gate
 bandit -r cli_anything/ -ll -x '*/tests/*,*/test_*.py'    # security gate
 cli-anything-espresense --help                            # CLI help
@@ -53,6 +53,7 @@ Every command supports `--json`.
 - New keys/ids the harness writes go through `yaml_io.dq()` (double-quoted) for the same reason coordinate lists go through `flow_seq()`: hand-authored configs quote `"rssi@1m"` and `"irk:abc"`, and bare `@`/`:` scalars are the ones a reader or a stricter parser has to think twice about.
 - `validate.check` gained `duplicate_device_id`/`device_missing_id`/`bad_device_rssi` (errors), `device_without_name`/`no_locator_enabled` (warnings). `counts` deliberately still reports only floors/rooms/nodes/errors/warnings — tests assert that dict by equality, and it is a documented stable surface.
 - New geometry findings in `validate` are warnings, not errors: `node_point_outside_room`, `room_overlap`, `room_outside_floor_bounds`, `node_point_outside_bounds`. Deliberate — odd floor plans are legal, so they must not fail a push unless `--strict`. `rooms overlaps` exits 1 on its own for callers who want that one check to gate.
+- Device distance calibration (v0.10.0) has two routes to one number and one durable sink, and the tests pin that they line up: `node calibrate <ip> <device> <metres>` calls the firmware's own `GET /calibrate?name=&distance=` flow (what the node web UI's calibration button does — the node recomputes rssi@1m from its *current* reading, so it only touches node state); `calibration compute <rssi> <metres> --absorption N` is pure maths in `core/calibration.compute_rssi_at_1m` inverting the firmware's log-distance model (`rssi@1m = rssi + 10·n·log10(d)`) for a reading you measured yourself. Both feed `node config-set --rssi-at-1m` / `devices add-to-config --rssi-at-1m` to become durable. `calibration compute` takes signed RSSI as positionals, so it carries `context_settings=COORD_SETTINGS` like the signed-coordinate commands. The firmware `/calibrate` response is parsed defensively (JSON or raw text) like `info()`, because firmware versions differ in what they answer.
 
 ## Conventions
 - MIT licensed. Adding a command group = a `core/` module + wiring in `espresense_cli.py` + unit tests for the core module + E2E CLI tests (`CliRunner`) asserting `--json` parses and `--help` works.

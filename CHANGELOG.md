@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.10.0] — 2026-10-04
+
+- Device distance calibration, end to end. Wrong `rssi@1m` values are the
+  #1 cause of "everything is 2 rooms over" in an ESPresense deployment, and
+  the harness could describe the calibration matrix (`calibration get /
+  summary`) but not produce or apply a corrected value. Two routes to the
+  same number now close that loop, feeding one durable sink:
+  - `node calibrate <ip> <device> <metres>` — the firmware web UI's
+    calibration button, finally at the shell. With the device held at a
+    known distance, it calls the firmware's own
+    `GET /calibrate?name=<device>&distance=<m>`; the node recomputes that
+    device's `rssi@1m` from its *current* reading. The result lives in node
+    state only, so the command output says so and points at the durable
+    sink.
+  - `calibration compute <rssi> <metres> [--absorption N]` — measured a
+    reading yourself (or from a pasted node report)? This pure-maths command
+    (no node, companion, or broker needed) inverts the firmware's
+    log-distance model: `rssi@1m = rssi + 10·n·log10(d)`, where `n` is the
+    `absorption` setting (default 2.0). RSSI is negative, so it takes signed
+    positionals under the same `COORD_SETTINGS` handling as `rooms move` —
+    `calibration compute -76.5 1.4` works.
+  - The durable sink both feed: `node config-set --rssi-at-1m` (per-node
+    device config) and `devices add-to-config --rssi-at-1m` (config.yaml).
+  - New pure `core/calibration.compute_rssi_at_1m(rssi, distance,
+    absorption)`; new `core/node_direct.NodeClient.calibrate`, parsing the
+    firmware's response defensively (JSON or raw text) exactly like
+    `info()` does, since firmware versions answer differently.
+- Unit-tested in `test_core.py` (`TestComputeRssiAt1m`: identity at 1 m,
+  formula inversion against `10·n·log10(d)`, absorption scaling, sub-metre
+  readings imply a *lower* rssi@1m, ValueError guards, string inputs;
+  `TestNodeCalibrate`: request params, HTTP error → `NodeError`, bad-JSON
+  fallback, guards); CLI behaviour pinned in `test_full_e2e.py`
+  (`TestNodeCalibrateE2E`, `TestCalibrationComputeE2E`) and the measure →
+  calibrate → persist arc in `TestCalibrationWorkflow`, which asserts the
+  value `compute` emits is exactly what `node config-set --rssi-at-1m`
+  receives and that a 1 m reading round-trips untouched.
+- Docs updated: both READMEs, both SKILL.md copies (kept byte-identical),
+  TEST.md, CLAUDE.md.
+
 ## [0.9.0] — 2026-09-28
 
 - `config diff` — proof that the companion is actually running the deployed
