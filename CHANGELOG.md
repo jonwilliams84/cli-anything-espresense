@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.1] — 2026-10-05
+
+- CI: the Security Scan "Ruff Lint" job no longer fails on a transient
+  runner-network error. The step installed ruff with a single `pip install`,
+  so one flaky `IncompleteRead` mid-download (run 37198709221) aborted the
+  whole job. The install now retries up to three times with a 60 s read
+  timeout and linear backoff before giving up. No lint findings changed,
+  no code changed.
+
 ## [0.10.0] — 2026-10-04
 
 - Device distance calibration, end to end. Wrong `rssi@1m` values are the

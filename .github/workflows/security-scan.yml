@@ -48,7 +48,19 @@ jobs:
           python-version: '3.12'
       - name: Install ruff and lint
         run: |
-          pip install ruff
+          # Transient runner-network failures (pip IncompleteRead mid-download,
+          # run 37198709221) must not fail the scan job. pip's own --retries does
+          # not cover a broken transfer, so retry the install at the shell level.
+          pip_install_ok=false
+          for attempt in 1 2 3; do
+            if pip install --timeout 60 ruff; then
+              pip_install_ok=true
+              break
+            fi
+            echo "pip install ruff failed (attempt $attempt); retrying..."
+            sleep $((attempt * 10))
+          done
+          [ "$pip_install_ok" = true ] || exit 1
           # ADVISORY scope, deliberately WIDER than the blocking gate in ci.yml.
           # Running bare `ruff check` here honours pyproject.toml, i.e. exactly the
           # rules the gate already enforces - so this job reported 0 findings and
