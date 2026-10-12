@@ -10,8 +10,11 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from click.testing import CliRunner
 
+from cli_anything.espresense.core import mqtt as mqtt_core
 from cli_anything.espresense.espresense_cli import cli
 from cli_anything.espresense.utils import yaml_io
 
@@ -1225,3 +1228,349 @@ class TestCalibrationWorkflow:
             ["--config", str(cfg), "--json", "calibration", "compute", str(firmware_value), "1"],
         )
         assert json.loads(one_metre.output)["rssi_at_1m"] == firmware_value
+
+
+# ── mqtt settings / mqtt get (v0.11.0) ──────────────────────────────────────
+
+SETTING_RECORDS = [
+    {
+        "topic": "espresense/settings/expiration/set",
+        "payload": "300",
+        "ts": 1.0,
+        "retain": True,
+    },
+    {
+        "topic": "espresense/settings/telemetry/set",
+        "payload": "true",
+        "ts": 1.0,
+        "retain": True,
+    },
+    {
+        "topic": "espresense/settings/mqtt_password/set",
+        "payload": "hunter2",
+        "ts": 1.0,
+        "retain": True,
+    },
+    {
+        "topic": "espresense/settings/gps/set",
+        "payload": '{"lat": 51.5, "lng": -0.1}',
+        "ts": 1.0,
+        "retain": True,
+    },
+    # in-flight: someone just published but it is not the broker's state yet
+    {
+        "topic": "espresense/settings/expiration/set",
+        "payload": "999",
+        "ts": 9.0,
+        "retain": False,
+    },
+]
+
+
+class TestMqttSettingsE2E:
+    def test_json_dumps_retained_settings_redacted(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=SETTING_RECORDS) as w:
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "mqtt", "settings", "--duration", "1"]
+            )
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["prefix"] == "espresense"
+        assert out["count"] == 4
+        sorted_keys = ["expiration", "gps", "mqtt_password", "telemetry"]
+        assert out["keys"] == sorted_keys
+        assert out["settings"]["expiration"] == 300
+        assert out["settings"]["telemetry"] is True
+        assert out["settings"]["gps"] == {"lat": 51.5, "lng": -0.1}
+        assert out["settings"]["mqtt_password"] == "***"
+        # the subscription is exactly the global-settings family
+        assert w.call_args[1]["topic_filter"] == "espresense/settings/+/set"
+        assert w.call_args[1]["duration"] == 1
+
+    def test_reveal_shows_secret(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=SETTING_RECORDS):
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "mqtt", "settings", "--reveal"]
+            )
+        out = json.loads(result.output)
+        assert out["settings"]["mqtt_password"] == "hunter2"
+
+    def test_human_output_lists_settings(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=SETTING_RECORDS):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "settings"])
+        assert result.exit_code == 0
+        assert "expiration: 300" in result.output
+        assert "telemetry: true" in result.output
+        assert "hunter2" not in result.output
+
+    def test_key_presents_value(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=SETTING_RECORDS):
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "mqtt", "settings", "--key", "expiration"]
+            )
+        out = json.loads(result.output)
+        assert out == {"prefix": "espresense", "key": "expiration", "present": True, "value": 300}
+
+    def test_key_absent_exits_1(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=SETTING_RECORDS):
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "mqtt", "settings", "--key", "nope"]
+            )
+        assert result.exit_code == 1
+        out = json.loads(result.output)
+        assert out["present"] is False
+        assert out["value"] is None
+
+    def test_key_secret_redacted_by_default(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=SETTING_RECORDS):
+            result = CliRunner().invoke(
+                cli,
+                ["--config", str(cfg), "--json", "mqtt", "settings", "--key", "mqtt_password"],
+            )
+        out = json.loads(result.output)
+        assert out["value"] == "***"
+
+    def test_nothing_retained_is_not_an_error(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=[]):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "settings"])
+        assert result.exit_code == 0
+        assert "no settings retained" in result.output
+
+    def test_missing_broker_aborts(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "settings"])
+        assert result.exit_code == 1
+        assert "no MQTT broker configured" in result.output
+
+    def test_help(self):
+        res = CliRunner().invoke(cli, ["mqtt", "settings", "--help"])
+        assert res.exit_code == 0
+        assert "retained" in res.output
+
+
+class TestMqttGetE2E:
+    RETAINED = [
+        {"topic": "espresense/settings/expiration/set", "payload": "300", "ts": 1.0, "retain": True}
+    ]
+    LIVE_ONLY = [
+        {
+            "topic": "espresense/settings/expiration/set",
+            "payload": "999",
+            "ts": 5.0,
+            "retain": False,
+        }
+    ]
+
+    def test_json_readback(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=self.RETAINED):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--config",
+                    str(cfg),
+                    "--json",
+                    "mqtt",
+                    "get",
+                    "espresense/settings/expiration/set",
+                ],
+            )
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out == {
+            "topic": "espresense/settings/expiration/set",
+            "found": True,
+            "retained": True,
+            "payload_raw": "300",
+            "payload": 300,
+        }
+
+    def test_human_output_prints_the_value(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=self.RETAINED):
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "mqtt", "get", "espresense/settings/expiration/set"]
+            )
+        assert result.exit_code == 0
+        assert "300" in result.output
+
+    def test_missing_topic_exits_1_with_found_false(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=[]):
+            result = CliRunner().invoke(
+                cli,
+                ["--config", str(cfg), "--json", "mqtt", "get", "espresense/settings/gone/set"],
+            )
+        assert result.exit_code == 1
+        assert json.loads(result.output) == {
+            "topic": "espresense/settings/gone/set",
+            "found": False,
+        }
+
+    def test_live_only_message_warns_not_retained(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=self.LIVE_ONLY):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--config",
+                    str(cfg),
+                    "--json",
+                    "mqtt",
+                    "get",
+                    "espresense/settings/expiration/set",
+                ],
+            )
+        assert result.exit_code == 0
+        # the not-retained note goes to stderr and click merges it with the
+        # JSON body — split it off before parsing
+        out = json.loads(result.output.split("\nnote:")[0])
+        assert out["found"] is True
+        assert out["retained"] is False
+        assert out["payload"] == 999
+        assert "not retained" in result.output
+
+    def test_other_topics_filtered_out(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        noise = [
+            {
+                "topic": "espresense/settings/other/set",
+                "payload": "x",
+                "ts": 1.0,
+                "retain": True,
+            }
+        ]
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=noise):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--config",
+                    str(cfg),
+                    "--json",
+                    "mqtt",
+                    "get",
+                    "espresense/settings/expiration/set",
+                ],
+            )
+        assert result.exit_code == 1
+
+    def test_empty_topic_aborts(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "get", "  "])
+        assert result.exit_code == 1
+        assert "non-empty" in result.output
+
+    def test_help(self):
+        res = CliRunner().invoke(cli, ["mqtt", "get", "--help"])
+        assert res.exit_code == 0
+        assert "retained" in res.output
+
+
+class TestMqttReadbackWorkflow:
+    """set-global → settings/get read-back over an in-memory broker.
+
+    Substitutes a tiny retained-message store for the paho transport so the
+    whole write→verify arc runs with no network: `set-global` leaves a
+    retained record, the read commands only ever see what the broker would
+    serve a fresh subscriber.
+    """
+
+    @pytest.fixture()
+    def broker(self, monkeypatch):
+        store: list[dict] = []
+
+        def fake_publish_global(host, key, value, *, prefix="espresense", retain=True, **_):
+            rec = {
+                "topic": f"{prefix}/settings/{key}/set",
+                "payload": mqtt_core._stringify(value),
+                "ts": 1.0,
+                "retain": retain,
+            }
+            store.append(rec)
+            return {"topic": rec["topic"], "payload": rec["payload"], "rc": 0}
+
+        def mqtt_match(topic: str, topic_filter: str) -> bool:
+            """MQTT wildcard match: `+` one level, trailing `#` the rest."""
+            t_parts, f_parts = topic.split("/"), topic_filter.split("/")
+            if f_parts and f_parts[-1] == "#":
+                return t_parts[: len(f_parts) - 1] == f_parts[:-1]
+            if len(t_parts) != len(f_parts):
+                return False
+            return all(f in ("+", t_p) for f, t_p in zip(f_parts, t_parts, strict=True))
+
+        def fake_watch(topic_filter, *, duration=None, **_):
+            return [r for r in store if r["retain"] and mqtt_match(r["topic"], topic_filter)]
+
+        monkeypatch.setattr(
+            "cli_anything.espresense.espresense_cli.mqtt_core.publish_global_setting",
+            fake_publish_global,
+        )
+        monkeypatch.setattr("cli_anything.espresense.core.mqtt.watch", fake_watch)
+        return store
+
+    def _invoke(self, tmp_path, *args, as_json=True):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        argv = ["--config", str(cfg)] + (["--json"] if as_json else []) + list(args)
+        return CliRunner().invoke(cli, argv)
+
+    def test_set_global_is_visible_in_settings(self, tmp_path, broker):
+        assert self._invoke(tmp_path, "mqtt", "set-global", "expiration", "300").exit_code == 0
+        result = self._invoke(tmp_path, "mqtt", "settings")
+        out = json.loads(result.output)
+        assert out["settings"]["expiration"] == 300
+        assert out["count"] == 1
+
+    def test_set_global_key_and_value_match(self, tmp_path, broker):
+        assert self._invoke(tmp_path, "mqtt", "set-global", "telemetry", "true").exit_code == 0
+        result = self._invoke(tmp_path, "mqtt", "settings", "--key", "telemetry")
+        assert json.loads(result.output) == {
+            "prefix": "espresense",
+            "key": "telemetry",
+            "present": True,
+            "value": True,
+        }
+
+    def test_json_object_setting_round_trips(self, tmp_path, broker):
+        assert (
+            self._invoke(
+                tmp_path, "mqtt", "set-global", "gps", '{"lat": 51.5, "lng": -0.1}'
+            ).exit_code
+            == 0
+        )
+        result = self._invoke(tmp_path, "mqtt", "settings", "--key", "gps")
+        assert json.loads(result.output)["value"] == {"lat": 51.5, "lng": -0.1}
+
+    def test_settings_verifies_get_readback(self, tmp_path, broker):
+        assert self._invoke(tmp_path, "mqtt", "set-global", "expiration", "300").exit_code == 0
+        result = self._invoke(tmp_path, "mqtt", "get", "espresense/settings/expiration/set")
+        out = json.loads(result.output)
+        assert out["found"] is True
+        assert out["retained"] is True
+        assert out["payload"] == 300
+
+    def test_no_retain_write_never_becomes_broker_state(self, tmp_path, broker):
+        # a retained write first, so the store is not empty...
+        assert self._invoke(tmp_path, "mqtt", "set-global", "expiration", "1").exit_code == 0
+        assert len(broker) == 1
+        # ...then a --no-retain write, which only publishes live traffic
+        assert (
+            self._invoke(
+                tmp_path, "mqtt", "set-global", "expiration", "999", "--no-retain"
+            ).exit_code
+            == 0
+        )
+        with_retain = [r for r in broker if r["retain"]]
+        assert len(broker) == 2
+        assert len(with_retain) == 1
+        result = self._invoke(tmp_path, "mqtt", "settings")
+        out = json.loads(result.output)
+        # read-back sees only retained state: 1 stored key, still value 1
+        assert out["count"] == 1
+        assert out["settings"]["expiration"] == 1

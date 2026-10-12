@@ -167,7 +167,9 @@ def watch(
     """Subscribe to a topic filter and collect/print messages.
 
     If `duration` is None, runs until KeyboardInterrupt. Returns a list of
-    {topic, payload, ts} dicts collected during the watch.
+    {topic, payload, ts, retain} dicts collected during the watch; `retain`
+    is True for the messages a broker delivers immediately at subscribe time
+    to serve its last retained value for a topic.
     """
     collected: list[dict] = []
 
@@ -176,6 +178,10 @@ def watch(
             "topic": msg.topic,
             "payload": msg.payload.decode("utf-8", errors="replace"),
             "ts": time.time(),
+            # True for a broker-reserved message delivered at subscribe time.
+            # `mqtt get` / `mqtt settings` read exactly these, so a value can
+            # be *read back*, not just watched flowing past.
+            "retain": bool(getattr(msg, "retain", False)),
         }
         collected.append(rec)
         if callback:
@@ -253,3 +259,94 @@ def publish_device_config(
         password=password,
         retain=retain,
     )
+
+
+# ──────────────────────────────────────────────────────── read side
+#
+# The writing half of this module (publish_setting / publish_global_setting /
+# publish_device_config) puts state on the broker as *retained* messages —
+# that is how nodes and the companion re-apply settings at startup. The
+# helpers below read that state back, so a `set-global` can be verified
+# without the companion REST API being up (the exact scenario the MQTT
+# route exists for). Like `telemetry.aggregate_*`, the aggregation is pure:
+# it folds `watch()` records and does no I/O.
+
+
+def parse_payload(raw: str):
+    """Decode an MQTT payload: JSON where it parses, the raw string otherwise.
+
+    Global settings payloads are frequently JSON (`gps` is an object) but
+    scalars arrive as bare text (`telemetry` is `true`, `expiration` is
+    `300`), and this must never raise on the text a firmware decided to
+    send — worst case the payload stays a string, which is still honest.
+    """
+    raw_str = str(raw)
+    if raw_str.strip() in ("", "null"):
+        return None
+    try:
+        return json.loads(raw_str)
+    except (json.JSONDecodeError, ValueError):
+        return raw_str
+
+
+def retained(records: list[dict]) -> list[dict]:
+    """Filter `watch()` records down to the broker-retained ones.
+
+    Live messages and retained read-backs arrive on the same topics during
+    the collection window; only retained messages are the broker's current
+    state, so anything else is in-flight traffic someone just published and
+    must not be mistaken for a setting that survived a restart.
+    """
+    return [r for r in (records or []) if isinstance(r, dict) and r.get("retain")]
+
+
+def latest_by_topic(records: list[dict]) -> dict:
+    """Keep only the most recent record per topic (tie broken by retain).
+
+    Reading back one topic can see several messages if a publisher is
+    active; the retained value wins, then recency, so what comes out is the
+    value the broker will serve to the next subscriber.
+    """
+    best: dict = {}
+    for rec in records or []:
+        if not isinstance(rec, dict):
+            continue
+        topic = rec.get("topic")
+        if topic is None:
+            continue
+        if topic not in best or _beats(rec, best[topic]):
+            best[topic] = rec
+    return best
+
+
+def _beats(candidate: dict, incumbent: dict) -> bool:
+    """Does `candidate` outrank the `incumbent` record for the same topic?"""
+    retain_a = bool(candidate.get("retain"))
+    retain_b = bool(incumbent.get("retain"))
+    if retain_a != retain_b:
+        return retain_a
+    return (candidate.get("ts") or 0) >= (incumbent.get("ts") or 0)
+
+
+def settings_view(records: list[dict]) -> dict:
+    """Fold global-setting records into {key: parsed value}.
+
+    Input is `watch()` records from a `<prefix>/settings/+/set` subscription
+    (pass them through `retained()` first for read-back semantics). The key
+    is the `*` segment of the topic, so a record only counts when the topic
+    literally reads `<...>/settings/<key>/set` — per-device config records
+    (`<prefix>/settings/<id>/config`) and per-node writes
+    (`<prefix>/rooms/<id>/<key>/set`) never misattribute a key, whatever
+    collection they are folded with. Values go through `parse_payload` —
+    JSON where it parses.
+    """
+    view: dict = {}
+    for rec in records or []:
+        if not isinstance(rec, dict):
+            continue
+        topic = str(rec.get("topic") or "")
+        parts = topic.split("/")
+        if len(parts) < 3 or parts[-1] != "set" or parts[-3] != "settings":
+            continue
+        view[parts[-2]] = parse_payload(rec.get("payload", ""))
+    return view

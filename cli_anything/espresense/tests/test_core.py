@@ -1481,3 +1481,192 @@ class TestNodeCalibrate:
         c = NodeClient("host")
         with pytest.raises(ValueError, match="name"):
             c.calibrate("", 1.0)
+
+
+# ══════════════════════════════════════════════════ mqtt read side (v0.11.0)
+
+
+class TestParseMqttPayload:
+    """JSON where it parses, raw string otherwise; never raises."""
+
+    def test_json_object_parsed(self):
+        assert mqtt_core.parse_payload('{"lat": 51.5, "lng": -0.1}') == {
+            "lat": 51.5,
+            "lng": -0.1,
+        }
+
+    def test_int_payload_parsed(self):
+        assert mqtt_core.parse_payload("300") == 300
+
+    def test_bool_payload_parsed(self):
+        assert mqtt_core.parse_payload("true") is True
+
+    def test_list_payload_parsed(self):
+        assert mqtt_core.parse_payload("[1, 2]") == [1, 2]
+
+    def test_bare_text_stays_a_string(self):
+        assert mqtt_core.parse_payload("online") == "online"
+
+    def test_broken_json_stays_a_string(self):
+        assert mqtt_core.parse_payload("{not json") == "{not json"
+
+    def test_empty_payload_is_none(self):
+        assert mqtt_core.parse_payload("") is None
+        assert mqtt_core.parse_payload("null") is None
+
+    def test_never_raises_on_any_string(self):
+        # a firmware can send anything; "3.5" parses as float, whitespace-only
+        # payloads collapse to None, and the rest survives as text.
+        for odd in [" 3.5 ", "   ", "-0", "{}", "e5"]:
+            try:
+                mqtt_core.parse_payload(odd)
+            except Exception as exc:  # pragma: no cover - asserted below
+                pytest.fail(f"parse_payload raised on {odd!r}: {exc}")
+
+
+class TestRetainedFilter:
+    def test_keeps_only_retained(self):
+        recs = [
+            {"topic": "a", "retain": True},
+            {"topic": "b", "retain": False},
+            {"topic": "c", "retain": True},
+        ]
+        assert mqtt_core.retained(recs) == [
+            {"topic": "a", "retain": True},
+            {"topic": "c", "retain": True},
+        ]
+
+    def test_missing_retain_key_is_dropped(self):
+        # old-shape records (v0.10 watches) carry no retain flag and must not
+        # sneak in as stored state.
+        assert mqtt_core.retained([{"topic": "a"}, {"topic": "b", "retain": True}]) == [
+            {"topic": "b", "retain": True}
+        ]
+
+    def test_none_and_junk_are_safe(self):
+        assert mqtt_core.retained(None) == []
+        assert mqtt_core.retained([None, "x", 5]) == []
+
+
+class TestLatestByTopic:
+    def test_keeps_latest_per_topic(self):
+        recs = [
+            {"topic": "a", "payload": "1", "ts": 1.0},
+            {"topic": "a", "payload": "2", "ts": 2.0},
+            {"topic": "b", "payload": "9", "ts": 3.0},
+        ]
+        view = mqtt_core.latest_by_topic(recs)
+        assert view["a"]["payload"] == "2"
+        assert view["b"]["payload"] == "9"
+
+    def test_retained_beats_a_newer_live_message(self):
+        # the retained value is what the broker serves to the next subscriber;
+        # recency alone would misreport it.
+        recs = [
+            {"topic": "a", "payload": "live", "ts": 9.0, "retain": False},
+            {"topic": "a", "payload": "stored", "ts": 2.0, "retain": True},
+        ]
+        assert mqtt_core.latest_by_topic(recs)["a"]["payload"] == "stored"
+
+    def test_junk_rows_ignored(self):
+        assert mqtt_core.latest_by_topic([None, {}, {"topic": "t", "ts": 1}])["t"]["ts"] == 1
+
+    def test_empty(self):
+        assert mqtt_core.latest_by_topic([]) == {}
+        assert mqtt_core.latest_by_topic(None) == {}
+
+
+class TestMqttSettingsView:
+    """Folds <prefix>/settings/+/set records into {key: parsed value}."""
+
+    def test_grouped_by_key_with_payload_parsing(self):
+        recs = [
+            {"topic": "espresense/settings/expiration/set", "payload": "300"},
+            {"topic": "espresense/settings/telemetry/set", "payload": "true"},
+            {"topic": "espresense/settings/gps/set", "payload": '{"lat": 51.5, "lng": -0.1}'},
+        ]
+        assert mqtt_core.settings_view(recs) == {
+            "expiration": 300,
+            "telemetry": True,
+            "gps": {"lat": 51.5, "lng": -0.1},
+        }
+
+    def test_custom_prefix_key_still_parsed(self):
+        recs = [{"topic": "home/settings/duration/set", "payload": "90"}]
+        assert mqtt_core.settings_view(recs) == {"duration": 90}
+
+    def test_device_config_and_node_topics_are_ignored(self):
+        recs = [
+            {"topic": "espresense/settings/apple:1:2/config", "payload": '{"name": "x"}'},
+            {"topic": "espresense/rooms/kitchen/absorption/set", "payload": "2"},
+            {"topic": "espresense/rooms/kitchen/status", "payload": "online"},
+        ]
+        assert mqtt_core.settings_view(recs) == {}
+
+    def test_malformed_topic_ignored(self):
+        assert mqtt_core.settings_view([{"topic": "justaset", "payload": "1"}]) == {}
+
+    def test_junk_and_empty(self):
+        assert mqtt_core.settings_view(None) == {}
+        assert mqtt_core.settings_view([None, "x"]) == {}
+
+    def test_composes_with_retained(self):
+        recs = [
+            {"topic": "espresense/settings/expiration/set", "payload": "300", "retain": True},
+            {"topic": "espresense/settings/expiration/set", "payload": "999", "retain": False},
+        ]
+        assert mqtt_core.settings_view(mqtt_core.retained(recs)) == {"expiration": 300}
+
+
+def _deliver(fake, topic, payload, retain=True):
+    msg = MagicMock()
+    msg.topic = topic
+    msg.payload = payload if isinstance(payload, (bytes, bytearray)) else payload.encode()
+    msg.retain = retain
+    fake.on_message(None, None, msg)
+
+
+class TestWatchCarriesRetainFlag:
+    """The v0.11.0 read side stands on watch() records carrying msg.retain."""
+
+    def _watch(self, deliveries, topic_filter="espresense/settings/+/set", client_id=None):
+        with patch("cli_anything.espresense.core.mqtt.mqtt") as mock_mqtt:
+            fake = MagicMock()
+            mock_mqtt.Client.return_value = fake
+            received = []
+            import threading
+            import time as _time
+
+            t = threading.Thread(
+                target=lambda: received.append(
+                    mqtt_core.watch("broker.local", topic_filter, duration=0.15)
+                )
+            )
+            t.start()
+            _time.sleep(0.05)
+            fake.subscribe.assert_called_once_with(topic_filter, qos=0)
+            for topic, payload, retain in deliveries:
+                _deliver(fake, topic, payload, retain)
+            t.join(5)
+        return received[0] if received else []
+
+    def test_retained_message_marked(self):
+        out = self._watch([("espresense/settings/expiration/set", "300", True)])
+        assert out == [
+            {"topic": "espresense/settings/expiration/set", "payload": "300", "retain": True}
+        ] or (len(out) == 1 and out[0]["retain"] is True)
+
+    def test_live_message_not_retained(self):
+        out = self._watch([("espresense/settings/expiration/set", "300", False)])
+        assert len(out) == 1
+        assert out[0]["retain"] is False
+
+    def test_mixin_feeds_readback(self):
+        out = self._watch(
+            [
+                ("espresense/settings/expiration/set", "300", True),
+                ("espresense/settings/expiration/set", "999", False),
+            ]
+        )
+        view = mqtt_core.settings_view(mqtt_core.retained(out))
+        assert view == {"expiration": 300}

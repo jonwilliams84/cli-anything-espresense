@@ -1,6 +1,6 @@
 ---
 name: cli-anything-espresense
-description: CLI harness for the ESPresense ecosystem — read/edit/validate the companion's YAML config, rotate or rename rooms, add and reshape room polygons, manage floors and their bounds, place nodes by geometry, curate the tracked-device registry, tune timeouts/locators/optimizers by dotted path, set deployment-wide global settings over REST or MQTT, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry, query live presence (last-known position, node-to-device distances, node status, room occupancy), and aggregate fleet-level room usage from device history.
+description: CLI harness for the ESPresense ecosystem — read/edit/validate the companion's YAML config, rotate or rename rooms, add and reshape room polygons, manage floors and their bounds, place nodes by geometry, curate the tracked-device registry, tune timeouts/locators/optimizers by dotted path, set deployment-wide global settings over REST or MQTT, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry, query live presence (last-known position, node-to-device distances, node status, room occupancy), read back retained MQTT broker state, and aggregate fleet-level room usage from device history.
 ---
 
 # cli-anything-espresense
@@ -31,7 +31,9 @@ per-node ESP32 web UI, and direct MQTT — behind a single Click CLI with full
 - Reading or setting the companion's **global settings** — telemetry,
   expiration, availability timeout, GPS origin, include/exclude filters —
   which live outside config.yaml (`companion settings-keys/get/set`, or
-  `mqtt set-global` when the REST API is unreachable).
+  `mqtt set-global` when the REST API is unreachable), and verifying what is
+  actually **retained on the broker** afterwards (`mqtt settings`,
+  `mqtt get` — the state a restart re-applies).
 - Inspecting one ESP node's status, settings, or seen-devices list by IP.
 - Renaming the OTA hostname of a physical ESP node.
 - Streaming live device-position events from the companion.
@@ -78,7 +80,7 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `settings` | `settings show`, `settings show --section mqtt`, `settings get locators.nelder_mead.enabled`, `settings set away_timeout 300`, `settings unset weighting.algorithm`, `settings locators`, `settings locator nadaraya_watson off`, `settings optimizers`, `settings optimizer absorption off` |
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on`, `calibration compute <rssi> <metres> [--absorption N]` (pure maths: a reading taken at a known distance → the `rssi@1m` config value; RSSI is signed, pass it like coordinates) |
 | `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50`, `history trail <device-id>` (movement summary: room segments per visit, first/last seen, rooms visited), `history heatmap [--device <id>]... [--limit N]` (room usage across all tracked devices: points, visits, dwell seconds, devices per room, most-used first) |
-| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt node-status` (online/offline), `mqtt telemetry [--node <id>]` (node health snapshot: uptime, free memory, RSSI, version) |
+| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt settings [--key <k>] [--reveal]` (read back every retained global setting, parsed + secrets redacted; exits 1 for an absent `--key`), `mqtt get <topic>` (read back any single topic's retained/live value; exits 1 when nothing there), `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt node-status` (online/offline), `mqtt telemetry [--node <id>]` (node health snapshot: uptime, free memory, RSSI, version) |
 | `config` | `config show`, `config save`, `config doctor --file cfg.yaml`, `config diff [--against draft.yaml] [--file cfg.yaml]` (running-vs-deployed drift, exits 1 on differences) |
 | `repl` | Interactive shell (default with no subcommand) |
 
@@ -145,11 +147,18 @@ companion's own state — `settings set` will not reach them. Use
 `companion settings-get` (secrets redacted unless `--reveal`) and
 `companion settings-set`, or the retained MQTT twin `mqtt set-global` when
 the REST API is unreachable. Both coerce values identically, and known key
-spellings are listed by `companion settings-keys`:
+spellings are listed by `companion settings-keys`. After a `mqtt set-global`,
+**verify it landed** with `mqtt settings` (reads every retained
+`<prefix>/settings/<key>/set` straight off the broker — the state a restart
+re-applies, no companion needed; secrets redacted unless `--reveal`, and
+`--key <k>` exits 1 when that key was never retained) or `mqtt get <topic>`
+for any single topic:
 
 ```bash
 cli-anything-espresense --json companion settings-set expiration 300
 cli-anything-espresense --json mqtt set-global telemetry true
+cli-anything-espresense --json mqtt settings --key expiration
+cli-anything-espresense --json mqtt get espresense/settings/expiration/set
 ```
 
 ```bash

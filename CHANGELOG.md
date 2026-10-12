@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.11.0] — 2026-10-12
+
+- The MQTT write half finally has its read-back twin. `mqtt set-*` publishes
+  settings as **retained** messages — that is how the companion and the nodes
+  re-apply them at startup — but until now the only ways back to those values
+  were the companion REST API (`companion settings-get`, unreachable in
+  exactly the degraded scenario the MQTT route exists for) or eyeballing the
+  `mqtt watch` firehose. Two commands close that write→verify loop:
+  - `mqtt settings` — reads every retained `espresense/settings/<key>/set`
+    straight off the broker and reports the deployment's durable knob
+    settings, parsed (`gps` comes back an object, `expiration` an int,
+    `telemetry` a bool — same parse as everywhere else) with secrets
+    (`mqtt.password`, tokens — anything matching `settings.SECRET_HINTS`)
+    redacted unless `--reveal`. `--key <k>` narrows to one key and exits 1
+    when that key was never retained, so it gates a sequence:
+    `mqtt set-global expiration 300 && mqtt settings --key expiration`.
+    This is the broker-side twin of `companion settings-get`: one is the
+    companion's in-memory view, the other what a restart re-applies.
+  - `mqtt get <topic>` — reads back any single topic, not just the settings
+    family: retained node status, device config fingerprints, whatever the
+    deployment stores. Reports `retained: true/false` (with a warning when
+    the newest message wasn't retained — it would not survive a restart)
+    and exits 1 when the topic produced nothing, the `devices whereis`
+    gating shape.
+- Under the hood: `mqtt.watch()` records now carry `retain` (True for
+  broker-reserved messages delivered at subscribe time); new pure helpers in
+  `core/mqtt.py` do the aggregation with no I/O — `parse_payload` (JSON where
+  it parses, raw string otherwise, never raises on firmware weirdness),
+  `retained` (drops in-flight traffic: a live message must never be mistaken
+  for stored state), `latest_by_topic` (a retained value beats a newer live
+  one on the same topic) and `settings_view` (matches the literal
+  `<...>/settings/<key>/set` shape, so a per-node `rooms/<id>/<key>/set`
+  record can never misattribute a key).
+- Unit-tested in `test_core.py` (`TestParseMqttPayload`,
+  `TestRetainedFilter`, `TestLatestByTopic`, `TestMqttSettingsView`,
+  `TestWatchCarriesRetainFlag`); CLI behaviour pinned in `test_full_e2e.py`
+  (`TestMqttSettingsE2E`, `TestMqttGetE2E`) and the
+  publish → read-back arc in `TestMqttReadbackWorkflow`, which runs
+  `mqtt set-global → mqtt settings / mqtt get` against an in-memory retained
+  store with real MQTT `+`-wildcard matching and asserts a `--no-retain`
+  write never becomes stored state.
+- Docs updated: both READMEs, both SKILL.md copies (kept byte-identical),
+  TEST.md, CLAUDE.md.
+
 ## [0.10.1] — 2026-10-05
 
 - CI: the Security Scan "Ruff Lint" job no longer fails on a transient

@@ -52,7 +52,7 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 | `devices` | `list / show / set / delete / whereis / occupancy` — tracked devices (phones, tags, beacons), incl. last-known position and live room occupancy |
 | `calibration` | `get / summary / reset / auto-optimize / compute` — calibration matrix + autocalibration, plus a pure `compute` command turning a measured RSSI at a known distance into the `rssi@1m` value config.yaml wants |
 | `history` | `get / trail / heatmap` — per-device position history, a movement summary (room segments per visit, first/last seen, rooms visited in order), and a fleet-level room-usage heatmap (points, visits, dwell seconds and devices per room, across all tracked devices) |
-| `mqtt` | `set-node / set-device / set-global / pub / watch / distances / node-status / telemetry` — raw MQTT pub/sub plus aggregated live snapshots (node→device distances, node online/offline, node health: uptime / free memory / RSSI / version) |
+| `mqtt` | `set-node / set-device / set-global / pub / watch / get / settings / distances / node-status / telemetry` — raw MQTT pub/sub, read-back of retained broker state (any topic, and the whole global-settings table with secrets redacted), plus aggregated live snapshots (node→device distances, node online/offline, node health: uptime / free memory / RSSI / version) |
 | `config` | `show / save` (local connection profile) + `doctor` (validate config.yaml) + `diff` (running-vs-deployed drift, exits 1 on differences) |
 | `repl` | Interactive shell (default with no subcommand) |
 
@@ -241,6 +241,31 @@ you override with `--type str|int|float|bool|json`. `settings-get` output is
 redacted by default. Unknown keys are still accepted — the companion owns the
 schema — but `companion settings-keys` lists the spellings that exist today.
 
+Reading them back has two truth-sources, one per transport: `companion
+settings-get` is the companion's in-memory view; `mqtt settings` reads the
+**retained messages straight off the broker** — what the deployment will
+re-apply at its next boot, verified even when the companion REST API is
+down:
+
+```bash
+# Every retained global setting, parsed (JSON stays an object) and with
+# secrets redacted unless --reveal; exits 1 for --key with nothing retained
+cli-anything-espresense mqtt settings
+cli-anything-espresense mqtt settings --key expiration
+cli-anything-espresense mqtt set-global expiration 300 && \
+  cli-anything-espresense mqtt settings --key expiration
+
+# Any single topic's current value, retained or just-live
+cli-anything-espresense mqtt get espresense/settings/expiration/set
+```
+
+`mqtt get <topic>` is the one-topic cousin: any topic, not just the settings
+family — node status, device config fingerprints, whatever the deployment
+retains. It reports `retained: true/false` (the companion's twin of the
+value is `false` if nothing is stored for a fresh subscriber) and exits 1
+when the topic produced nothing, so it gates scripts like `devices whereis`
+does.
+
 ## Quick examples
 
 ```bash
@@ -340,7 +365,7 @@ the file on start, hence the `--restart` flag on every mutating command.
 python3 -m pytest cli_anything/espresense/tests/ -v
 ```
 
-1573 tests, 98.7% coverage — all against synthetic data on disk, no live
+1618 tests, 98.5% coverage — all against synthetic data on disk, no live
 broker, cluster or companion required. They cover the YAML round-trip, room
 rename + rotate (including atomic cycles and trailing-whitespace handling),
 the polygon/bounds maths (including the cases where two rooms must *not* be
