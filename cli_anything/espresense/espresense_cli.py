@@ -2465,6 +2465,135 @@ def mqtt_telemetry(ctx, node_id, duration, prefix):
         )
 
 
+@mqtt.command("settings")
+@click.option("--key", default=None, help="Only this setting key, e.g. expiration")
+@click.option("--reveal", is_flag=True, help="Do not redact secret values")
+@click.option(
+    "--duration",
+    default=2.0,
+    type=float,
+    help="Seconds to collect retained messages (default: 2)",
+)
+@click.option("--prefix", default=None, help="Topic prefix (default: espresense)")
+@click.pass_context
+def mqtt_settings(ctx, key, reveal, duration, prefix):
+    """Read the retained global settings straight off the broker.
+
+    `mqtt set-global` writes `espresense/<key>/set` as retained messages —
+    that is what nodes and the companion re-apply at startup. This command
+    subscribes to `<prefix>/settings/+/set` for --duration seconds and reads
+    those retained values back, so you can VERIFY what a deployment will
+    actually boot with even when the companion REST API is unreachable (the
+    exact scenario `set-global` exists for). Scalar payloads come back as
+    text, JSON payloads as objects, via the same parse as everywhere else.
+
+    Use `companion settings-get` for the companion's in-memory view — these
+    are the twin truth-checks of the setting pair. Secrets are redacted by
+    default; `--reveal` opts out. Exits 1 when nothing is retained under
+    KEY, so it can gate a script.
+
+    Example:
+      mqtt settings
+      mqtt settings --key expiration
+      mqtt set-global expiration 300 && mqtt settings --key expiration
+    """
+    p = prefix or ctx.obj.get("mqtt_topic_prefix", "espresense")
+    kw = _mqtt_args(ctx)
+    try:
+        records = mqtt_core.watch(topic_filter=f"{p}/settings/+/set", duration=duration, **kw)
+    except mqtt_core.MqttError as exc:
+        _abort(str(exc))
+        return
+    view = mqtt_core.settings_view(mqtt_core.retained(records))
+    if key:
+        present = key in view
+        value = view.get(key) if present else None
+        if present and not reveal and settings_core.is_secret(key):
+            value = settings_core.REDACTED
+        out = {"prefix": p, "key": key, "present": present, "value": value}
+        emit(ctx, out)
+        if not present:
+            sys.exit(1)
+        return
+    shown = dict(view)
+    if not reveal:
+        shown = {
+            k: (settings_core.REDACTED if settings_core.is_secret(k) else v)
+            for k, v in view.items()
+        }
+    out = {"prefix": p, "count": len(shown), "keys": sorted(shown), "settings": shown}
+    if ctx.obj.get("as_json"):
+        emit(ctx, out)
+        return
+    if not shown:
+        click.echo(
+            f"no settings retained on {p}/settings/+/set — nothing has been "
+            "set-global'd yet, or they were sent with --no-retain"
+        )
+        return
+    for k in sorted(shown):
+        click.echo(f"{k}: {json.dumps(shown[k], default=str)}")
+
+
+@mqtt.command("get")
+@click.argument("topic")
+@click.option(
+    "--duration",
+    default=2.0,
+    type=float,
+    help="Seconds to collect messages (default: 2; retained ones arrive first)",
+)
+@click.pass_context
+def mqtt_get(ctx, topic, duration):
+    """Read back a single broker topic's current value (retained read).
+
+    Subscribes to TOPIC exactly, and reports what the broker serves: the
+    retained value if there is one, otherwise the newest message seen in
+    the window (with `retained: false`, a warning that it would not survive
+    a restart). `mqtt get` is the one-topic cousin of `mqtt settings` —
+    which reads every retained global setting at once — and it works for
+    any topic, not just the settings family: node status, device config
+    fingerprints, whatever the deployment retains.
+
+    Exits 1 when the topic produced nothing in the window, so it can gate a
+    script the way `devices whereis` does.
+
+    Example:
+      mqtt get espresense/settings/expiration/set
+      mqtt get espresense/rooms/kitchen/device_tracker/apple:1005
+    """
+    topic = str(topic).strip()
+    if not topic:
+        _abort("topic must be non-empty")
+        return
+    kw = _mqtt_args(ctx)
+    try:
+        records = mqtt_core.watch(topic_filter=topic, duration=duration, **kw)
+    except mqtt_core.MqttError as exc:
+        _abort(str(exc))
+        return
+    records = [r for r in records if r.get("topic") == topic]
+    if not records:
+        emit(ctx, {"topic": topic, "found": False})
+        sys.exit(1)
+        return
+    best = mqtt_core.latest_by_topic(records)[topic]
+    out = {
+        "topic": topic,
+        "found": True,
+        "retained": bool(best.get("retain")),
+        "payload_raw": best.get("payload", ""),
+        "payload": mqtt_core.parse_payload(best.get("payload", "")),
+    }
+    emit(ctx, out)
+    if not out["retained"]:
+        click.echo(
+            "note: the newest message on this topic was not retained; "
+            "nothing is stored for a fresh subscriber",
+            err=True,
+        )
+
+
 # ──────────────────────────────────────────────────────── REPL
 
 
