@@ -7,7 +7,8 @@ broker — e.g. for bulk setting pushes or live device-distance watching.
 Topic prefix is `espresense` by default; passed in as a constructor arg so
 deployments using a non-standard prefix still work.
 
-Setting topics (publish → retained):
+Setting topics (publish → retained, read back by `mqtt settings` /
+`mqtt devices` / `mqtt get`):
   espresense/rooms/<id>/<key>/set            ← per-node setting
   espresense/settings/<key>/set              ← global setting
   espresense/settings/<device-id>/config     ← per-device fingerprint
@@ -349,4 +350,33 @@ def settings_view(records: list[dict]) -> dict:
         if len(parts) < 3 or parts[-1] != "set" or parts[-3] != "settings":
             continue
         view[parts[-2]] = parse_payload(rec.get("payload", ""))
+    return view
+
+
+def device_configs_view(records: list[dict]) -> dict:
+    """Fold per-device config records into {device_id: parsed payload}.
+
+    Input is `watch()` records from a `<prefix>/settings/+/config`
+    subscription — the retained fingerprints `publish_device_config` (and
+    the companion itself) write, so the returned mapping is what nodes and
+    the companion will re-apply at startup. The id is the `*` segment of
+    the topic, so a record only counts when the topic literally reads
+    `<...>/settings/<id>/config` — global settings
+    (`<prefix>/settings/<key>/set`) and per-node writes
+    (`<prefix>/rooms/<id>/<key>/set`) never misattribute a device, whatever
+    collection they are folded with. Payloads go through `parse_payload` —
+    JSON where it parses, raw string otherwise, never raises.
+    """
+    view: dict = {}
+    for rec in records or []:
+        if not isinstance(rec, dict):
+            continue
+        topic = str(rec.get("topic") or "")
+        parts = topic.split("/")
+        if len(parts) < 4 or parts[-1] != "config" or parts[-3] != "settings":
+            continue
+        device_id = parts[-2]
+        if not device_id:
+            continue
+        view[device_id] = parse_payload(rec.get("payload", ""))
     return view

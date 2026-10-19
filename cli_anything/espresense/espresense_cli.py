@@ -2535,6 +2535,74 @@ def mqtt_settings(ctx, key, reveal, duration, prefix):
         click.echo(f"{k}: {json.dumps(shown[k], default=str)}")
 
 
+@mqtt.command("devices")
+@click.option("--device", "device_id", default=None, help="Only this device id")
+@click.option(
+    "--duration",
+    default=2.0,
+    type=float,
+    help="Seconds to collect retained messages (default: 2)",
+)
+@click.option("--prefix", default=None, help="Topic prefix (default: espresense)")
+@click.pass_context
+def mqtt_devices(ctx, device_id, duration, prefix):
+    """Read the retained per-device configs straight off the broker.
+
+    `mqtt set-device` writes `espresense/settings/<id>/config` as retained
+    messages — that is what nodes and the companion re-apply at startup.
+    This command subscribes to `<prefix>/settings/+/config` for --duration
+    seconds and reads every retained device fingerprint back in one call,
+    so you can VERIFY a set-device push (or the companion's own device
+    config writes) even when the companion REST API is unreachable — the
+    exact scenario the MQTT route exists for. Payloads come back parsed
+    (JSON as objects, scalar text as strings) via the same parse as
+    everywhere else.
+
+    The bulk twin of `mqtt get <prefix>/settings/<id>/config`, and the
+    broker-side counterpart of the per-node `node devices` view. Exits 1
+    when nothing is retained under DEVICE, so it can gate a script:
+
+    mqtt set-device apple:1005:9-12 '{"name": "..."}' && \\
+      mqtt devices --device apple:1005:9-12
+
+    Example:
+      mqtt devices
+      mqtt devices --device apple:1005:9-12
+    """
+    p = prefix or ctx.obj.get("mqtt_topic_prefix", "espresense")
+    kw = _mqtt_args(ctx)
+    try:
+        records = mqtt_core.watch(topic_filter=f"{p}/settings/+/config", duration=duration, **kw)
+    except mqtt_core.MqttError as exc:
+        _abort(str(exc))
+        return
+    view = mqtt_core.device_configs_view(mqtt_core.retained(records))
+    if device_id:
+        present = device_id in view
+        out = {
+            "prefix": p,
+            "device": device_id,
+            "present": present,
+            "config": view.get(device_id) if present else None,
+        }
+        emit(ctx, out)
+        if not present:
+            sys.exit(1)
+        return
+    out = {"prefix": p, "count": len(view), "ids": sorted(view), "devices": view}
+    if ctx.obj.get("as_json"):
+        emit(ctx, out)
+        return
+    if not view:
+        click.echo(
+            f"no device configs retained on {p}/settings/+/config — nothing has been "
+            "set-device'd yet, or they were sent with --no-retain"
+        )
+        return
+    for k in sorted(view):
+        click.echo(f"{k}: {json.dumps(view[k], default=str)}")
+
+
 @mqtt.command("get")
 @click.argument("topic")
 @click.option(

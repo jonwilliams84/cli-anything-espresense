@@ -52,7 +52,7 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 | `devices` | `list / show / set / delete / whereis / occupancy` — tracked devices (phones, tags, beacons), incl. last-known position and live room occupancy |
 | `calibration` | `get / summary / reset / auto-optimize / compute` — calibration matrix + autocalibration, plus a pure `compute` command turning a measured RSSI at a known distance into the `rssi@1m` value config.yaml wants |
 | `history` | `get / trail / heatmap` — per-device position history, a movement summary (room segments per visit, first/last seen, rooms visited in order), and a fleet-level room-usage heatmap (points, visits, dwell seconds and devices per room, across all tracked devices) |
-| `mqtt` | `set-node / set-device / set-global / pub / watch / get / settings / distances / node-status / telemetry` — raw MQTT pub/sub, read-back of retained broker state (any topic, and the whole global-settings table with secrets redacted), plus aggregated live snapshots (node→device distances, node online/offline, node health: uptime / free memory / RSSI / version) |
+| `mqtt` | `set-node / set-device / set-global / pub / watch / get / settings / devices / distances / node-status / telemetry` — raw MQTT pub/sub, read-back of retained broker state (any topic, the whole global-settings table and the whole per-device config table, with secrets redacted where applicable), plus aggregated live snapshots (node→device distances, node online/offline, node health: uptime / free memory / RSSI / version) |
 | `config` | `show / save` (local connection profile) + `doctor` (validate config.yaml) + `diff` (running-vs-deployed drift, exits 1 on differences) |
 | `repl` | Interactive shell (default with no subcommand) |
 
@@ -266,6 +266,26 @@ value is `false` if nothing is stored for a fresh subscriber) and exits 1
 when the topic produced nothing, so it gates scripts like `devices whereis`
 does.
 
+The per-device config family has the same bulk read-back: `mqtt devices`
+subscribes to `<prefix>/settings/+/config` and returns every retained
+device fingerprint in one call — the verify twin of `mqtt set-device`
+(and of the companion's own device-config writes), for when the write
+landed and you want to gate on it without one `mqtt get` per device:
+
+```bash
+# Every retained device config, parsed, IDs sorted
+cli-anything-espresense mqtt devices
+
+# Gate on one device's fingerprint (exits 1 while it is absent)
+cli-anything-espresense mqtt set-device apple:1005:9-12 '{"name":"Jon Watch"}' && \
+  cli-anything-espresense mqtt devices --device apple:1005:9-12
+```
+
+As with `mqtt settings`, only **retained** messages count — a live
+`--no-retain` write is in-flight traffic, not stored state, and the
+topic-shape fold (`.../settings/<id>/config`) means neighbouring
+`settings/<key>/set` records can never be misattributed to a device.
+
 ## Quick examples
 
 ```bash
@@ -311,6 +331,10 @@ cli-anything-espresense mqtt watch 'espresense/rooms/+/telemetry' --duration 10
 
 # Global settings via MQTT (retained; re-applied at startup)
 cli-anything-espresense mqtt set-global expiration 300
+
+# Every retained per-device config on the broker (verify a set-device push)
+cli-anything-espresense mqtt devices
+cli-anything-espresense mqtt devices --device apple:1005:9-12
 
 # Live device-position stream
 cli-anything-espresense companion stream --duration 30 --type deviceChanged
