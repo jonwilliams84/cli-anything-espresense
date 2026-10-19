@@ -1618,6 +1618,82 @@ class TestMqttSettingsView:
         assert mqtt_core.settings_view(mqtt_core.retained(recs)) == {"expiration": 300}
 
 
+class TestDeviceConfigsView:
+    """Folds <prefix>/settings/+/config records into {device_id: payload}."""
+
+    def test_grouped_by_device_with_payload_parsing(self):
+        recs = [
+            {
+                "topic": "espresense/settings/apple:1005:9-12/config",
+                "payload": '{"name": "Front Pocket", "rssi@1m": -63}',
+            },
+            {"topic": "espresense/settings/tags:leash/config", "payload": '{"alias": "leash"}'},
+        ]
+        assert mqtt_core.device_configs_view(recs) == {
+            "apple:1005:9-12": {"name": "Front Pocket", "rssi@1m": -63},
+            "tags:leash": {"alias": "leash"},
+        }
+
+    def test_custom_prefix_and_scalar_payload(self):
+        # payload that is not JSON (a raw fingerprint string) survives as text
+        recs = [{"topic": "home/settings/dev1/config", "payload": "{not json"}]
+        assert mqtt_core.device_configs_view(recs) == {"dev1": "{not json"}
+
+    def test_settings_and_node_topics_are_ignored(self):
+        recs = [
+            {"topic": "espresense/settings/expiration/set", "payload": "300"},
+            {"topic": "espresense/rooms/kitchen/absorption/set", "payload": "2"},
+            {"topic": "espresense/rooms/kitchen/status", "payload": "online"},
+            {"topic": "espresense/settings/telemetry", "payload": "{}"},
+        ]
+        assert mqtt_core.device_configs_view(recs) == {}
+
+    def test_malformed_topic_ignored(self):
+        assert mqtt_core.device_configs_view([{"topic": "config", "payload": "1"}]) == {}
+        assert mqtt_core.device_configs_view([{"topic": "settings//config", "payload": "1"}]) == {}
+
+    def test_junk_and_empty(self):
+        assert mqtt_core.device_configs_view(None) == {}
+        assert mqtt_core.device_configs_view([]) == {}
+        assert mqtt_core.device_configs_view([None, "x", 5]) == {}
+
+    def test_composes_with_retained(self):
+        recs = [
+            {
+                "topic": "espresense/settings/d1/config",
+                "payload": '{"name": "old"}',
+                "retain": False,
+                "ts": 9.0,
+            },
+            {
+                "topic": "espresense/settings/d1/config",
+                "payload": '{"name": "new"}',
+                "retain": True,
+                "ts": 1.0,
+            },
+        ]
+        # in-flight traffic must not win: read-back folds the retained-only set
+        assert mqtt_core.device_configs_view(mqtt_core.retained(recs)) == {"d1": {"name": "new"}}
+
+    def test_composes_with_latest_by_topic(self):
+        recs = [
+            {
+                "topic": "espresense/settings/d1/config",
+                "payload": '{"v": 1}',
+                "retain": True,
+                "ts": 1,
+            },
+            {
+                "topic": "espresense/settings/d1/config",
+                "payload": '{"v": 2}',
+                "retain": True,
+                "ts": 2,
+            },
+        ]
+        view = mqtt_core.device_configs_view(mqtt_core.latest_by_topic(recs).values())
+        assert view == {"d1": {"v": 2}}
+
+
 def _deliver(fake, topic, payload, retain=True):
     msg = MagicMock()
     msg.topic = topic

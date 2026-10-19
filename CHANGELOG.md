@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.12.0] — 2026-10-19
+
+- The retained read-back family is complete. v0.11.0 gave `mqtt set-*` its
+  verify twin for global settings (`mqtt settings`) and one-off topics
+  (`mqtt get`), but the per-device fingerprints — `mqtt set-device`'s
+  retained `espresense/settings/<id>/config` messages, which nodes and the
+  companion re-apply at startup — still needed one `mqtt get` call per
+  device to verify a push. One command closes that loop:
+  - `mqtt devices` — reads every retained `<prefix>/settings/+/config`
+    off the broker in a single listen and returns the fleet's device
+    config table: `{prefix, count, ids, devices}` with payloads parsed
+    (JSON comes back an object via the same `parse_payload` as everywhere
+    else; a raw string stays a string, never raised on). `--device <id>`
+    narrows to one fingerprint and **exits 1 while it was never retained**
+    — the `mqtt settings --key` gating shape — so it gates a push:
+    `mqtt set-device apple:1005:9-12 '{"name":"Jon Watch"}' && \
+    mqtt devices --device apple:1005:9-12`. Nothing retained is a human
+    hint plus exit 0 (they may all have been sent `--no-retain`).
+- Under the hood: one new pure helper in `core/mqtt.py` —
+  `device_configs_view(records)` folds `watch()` records by the `*`
+  segment with the same literal topic-shape match as `settings_view`
+  (`<...>/settings/<id>/config` only), so a global
+  `<prefix>/settings/<key>/set` record and a per-node
+  `<prefix>/rooms/<id>/<key>/set` record can never misattribute a device,
+  even folded into the same collection. Callers filter with the existing
+  `retained()` first — a live in-flight write is not stored state — and the
+  read-back composes with `latest_by_topic` for same-topic updates.
+- Unit-tested in `test_core.py` (`TestDeviceConfigsView`: shape matching,
+  neighbour-family isolation, malformed/empty topics, retained-only
+  composition, `latest_by_topic` composition); CLI behaviour pinned in
+  `test_full_e2e.py` (`TestMqttDevicesE2E`: parsed dump, in-flight
+  exclusion, human lines, `--device` present/absent + exit 1,
+  nothing-retained, missing-broker abort, custom prefix, `--help`; and
+  `TestMqttDeviceReadbackWorkflow`, which runs
+  `mqtt set-device` → `mqtt devices` / `mqtt get` against the same
+  in-memory retained store as the v0.11.0 workflow — proving the settings
+  and device-config families never bleed into each other's read-back and
+  a `--no-retain` write never becomes stored state).
+- Docs updated: both READMEs, both SKILL.md copies (kept byte-identical),
+  TEST.md, CLAUDE.md.
+
 ## [0.11.0] — 2026-10-12
 
 - The MQTT write half finally has its read-back twin. `mqtt set-*` publishes

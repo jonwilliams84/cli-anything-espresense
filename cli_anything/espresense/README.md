@@ -159,13 +159,18 @@ can gate a script like `rooms locate` does.
 ### Reading retained broker state
 
 `mqtt set-*` publishes settings as *retained* messages — that is how the
-companion and nodes re-apply them at startup. Two commands read that state
-back, so a settings push can be *verified* without the companion API:
+companion and nodes re-apply them at startup. Three commands read that
+state back, so a settings push can be *verified* without the companion API:
 
 ```bash
 # the whole global-settings table, parsed (JSON stays an object),
 # secrets redacted unless --reveal
 cli-anything-espresense mqtt settings
+
+# every retained per-device config fingerprint in one call
+cli-anything-espresense mqtt devices
+cli-anything-espresense mqtt set-device apple:1005:9-12 '{"name":"Jon Watch"}' && \
+  cli-anything-espresense mqtt devices --device apple:1005:9-12
 
 # any single topic, exact
 cli-anything-espresense mqtt get espresense/settings/expiration/set
@@ -173,7 +178,10 @@ cli-anything-espresense mqtt get espresense/settings/expiration/set
 
 `mqtt settings --key <k>` reports `{present, value}` and exits 1 when the
 key was never retained — the offline twin of `companion settings-get` and
-the read-back of `mqtt set-global`. `mqtt get <topic>` works for any topic
+the read-back of `mqtt set-global`. `mqtt devices` is the same gating shape
+over the per-device config family (`<prefix>/settings/+/config`), the bulk
+twin of `mqtt set-device`; `--device <id>` narrows to one fingerprint and
+exits 1 while it is absent. `mqtt get <topic>` works for any topic
 (node status, device config fingerprints), reports whether what it saw was
 retained, and exits 1 when the topic produced nothing, like `devices
 whereis` does.
@@ -387,7 +395,7 @@ is the `absorption` setting) for a reading you took at a known distance.
 | `history get / trail` | Per-device position history; `trail` folds it into a movement summary (consecutive room segments per visit, first/last seen, rooms visited in order) |
 | `history heatmap` | Fleet-level room usage: folds every tracked device's history into one table per room — points, visits (re-entries count), dwell seconds (visit spans, a lower bound) and the devices that visited, sorted most-used first. `--device` narrows to specific devices |
 | `mqtt set-node / set-device / set-global / pub / watch` | Raw MQTT pub/sub |
-| `mqtt get / settings` | Read-back of retained broker state: any single topic (`get`) or the whole global-settings table parsed + redacted (`settings`) |
+| `mqtt get / settings / devices` | Read-back of retained broker state: any single topic (`get`), the whole global-settings table parsed + redacted (`settings`), or every retained per-device config fingerprint at once (`devices`, gate with `--device <id>`) |
 | `mqtt distances / node-status / telemetry` | Aggregated live snapshots: node→device distances, node online/offline status, node health (uptime / free memory / RSSI / version) |
 | `config show / save / doctor / diff` | Local connection profile + config.yaml validation; `diff` compares the companion's running config against the deployed file and reports the drift as dotted paths (exits 1 on differences) |
 | `repl` | Interactive shell (default if no subcommand) |

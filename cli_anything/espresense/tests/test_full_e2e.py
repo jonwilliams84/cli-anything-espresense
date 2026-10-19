@@ -1574,3 +1574,255 @@ class TestMqttReadbackWorkflow:
         # read-back sees only retained state: 1 stored key, still value 1
         assert out["count"] == 1
         assert out["settings"]["expiration"] == 1
+
+
+# ── mqtt devices (v0.12.0) ───────────────────────────────────────────────────
+
+DEVICE_CONFIG_RECORDS = [
+    {
+        "topic": "espresense/settings/apple:1005:9-12/config",
+        "payload": '{"name": "Front Pocket", "rssi@1m": -63}',
+        "ts": 1.0,
+        "retain": True,
+    },
+    {
+        "topic": "espresense/settings/tags:leash/config",
+        "payload": '{"alias": "leash"}',
+        "ts": 1.0,
+        "retain": True,
+    },
+    # in-flight: freshly published, not yet the broker's state
+    {
+        "topic": "espresense/settings/apple:1005:9-12/config",
+        "payload": '{"name": "replacing"}',
+        "ts": 9.0,
+        "retain": False,
+    },
+]
+
+
+class TestMqttDevicesE2E:
+    def test_json_dumps_retained_device_configs(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch(
+            "cli_anything.espresense.core.mqtt.watch", return_value=DEVICE_CONFIG_RECORDS
+        ) as w:
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "mqtt", "devices", "--duration", "1"]
+            )
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["prefix"] == "espresense"
+        assert out["count"] == 2
+        assert out["ids"] == ["apple:1005:9-12", "tags:leash"]
+        assert out["devices"]["apple:1005:9-12"] == {"name": "Front Pocket", "rssi@1m": -63}
+        # the subscription is exactly the device-config family
+        assert w.call_args[1]["topic_filter"] == "espresense/settings/+/config"
+        assert w.call_args[1]["duration"] == 1
+
+    def test_in_flight_payloads_are_not_stored_state(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=DEVICE_CONFIG_RECORDS):
+            out = json.loads(
+                CliRunner().invoke(cli, ["--config", str(cfg), "--json", "mqtt", "devices"]).output
+            )
+        assert out["devices"]["apple:1005:9-12"] == {"name": "Front Pocket", "rssi@1m": -63}
+
+    def test_human_output_lists_device_configs(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=DEVICE_CONFIG_RECORDS):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "devices"])
+        assert result.exit_code == 0
+        assert "apple:1005:9-12: " in result.output
+        assert "Front Pocket" in result.output
+
+    def test_device_presents_parsed_config(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=DEVICE_CONFIG_RECORDS):
+            result = CliRunner().invoke(
+                cli,
+                ["--config", str(cfg), "--json", "mqtt", "devices", "--device", "apple:1005:9-12"],
+            )
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {
+            "prefix": "espresense",
+            "device": "apple:1005:9-12",
+            "present": True,
+            "config": {"name": "Front Pocket", "rssi@1m": -63},
+        }
+
+    def test_device_absent_exits_1(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=DEVICE_CONFIG_RECORDS):
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "mqtt", "devices", "--device", "nope"]
+            )
+        assert result.exit_code == 1
+        assert json.loads(result.output) == {
+            "prefix": "espresense",
+            "device": "nope",
+            "present": False,
+            "config": None,
+        }
+
+    def test_nothing_retained_is_not_an_error(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=[]):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "devices"])
+        assert result.exit_code == 0
+        assert "no device configs retained" in result.output
+
+    def test_missing_broker_aborts(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "devices"])
+        assert result.exit_code == 1
+        assert "no MQTT broker configured" in result.output
+
+    def test_custom_prefix(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=[]) as w:
+            CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "devices", "--prefix", "home2"])
+        assert w.call_args[1]["topic_filter"] == "home2/settings/+/config"
+
+    def test_help(self):
+        res = CliRunner().invoke(cli, ["mqtt", "devices", "--help"])
+        assert res.exit_code == 0
+        assert "retained" in res.output
+
+
+class TestMqttDeviceReadbackWorkflow:
+    """set-device → devices read-back over an in-memory broker.
+
+    Same shape as TestMqttReadbackWorkflow: a tiny retained-message store
+    stands in for the paho transport, so the whole write→verify arc runs
+    with no network. A `--no-retain` write must never become broker state.
+    """
+
+    @pytest.fixture()
+    def broker(self, monkeypatch):
+        store: list[dict] = []
+
+        def fake_publish_device(host, device_id, config, *, prefix="espresense", retain=True, **_):
+            rec = {
+                "topic": f"{prefix}/settings/{device_id}/config",
+                "payload": mqtt_core._stringify(config),
+                "ts": 1.0,
+                "retain": retain,
+            }
+            store.append(rec)
+            return {"topic": rec["topic"], "payload": rec["payload"], "rc": 0}
+
+        def mqtt_match(topic: str, topic_filter: str) -> bool:
+            t_parts, f_parts = topic.split("/"), topic_filter.split("/")
+            if f_parts and f_parts[-1] == "#":
+                return t_parts[: len(f_parts) - 1] == f_parts[:-1]
+            if len(t_parts) != len(f_parts):
+                return False
+            return all(f in ("+", t_p) for f, t_p in zip(f_parts, t_parts, strict=True))
+
+        def fake_watch(topic_filter, *, duration=None, **_):
+            return [r for r in store if r["retain"] and mqtt_match(r["topic"], topic_filter)]
+
+        monkeypatch.setattr(
+            "cli_anything.espresense.espresense_cli.mqtt_core.publish_device_config",
+            fake_publish_device,
+        )
+        # the family-isolation test also writes a global setting via the CLI
+        monkeypatch.setattr(
+            "cli_anything.espresense.espresense_cli.mqtt_core.publish_global_setting",
+            lambda host, key, value, *, prefix="espresense", retain=True, **_: (
+                store.append(
+                    {
+                        "topic": f"{prefix}/settings/{key}/set",
+                        "payload": mqtt_core._stringify(value),
+                        "ts": 1.0,
+                        "retain": retain,
+                    }
+                )
+                or {"rc": 0}
+            ),
+        )
+        monkeypatch.setattr("cli_anything.espresense.core.mqtt.watch", fake_watch)
+        return store
+
+    def _invoke(self, tmp_path, *args, as_json=True):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        argv = ["--config", str(cfg)] + (["--json"] if as_json else []) + list(args)
+        return CliRunner().invoke(cli, argv)
+
+    def test_set_device_is_visible_in_devices(self, tmp_path, broker):
+        assert (
+            self._invoke(
+                tmp_path,
+                "mqtt",
+                "set-device",
+                "apple:1005:9-12",
+                '{"name": "Front Pocket", "rssi@1m": -63}',
+            ).exit_code
+            == 0
+        )
+        result = self._invoke(tmp_path, "mqtt", "devices")
+        out = json.loads(result.output)
+        assert out["count"] == 1
+        assert out["devices"]["apple:1005:9-12"] == {"name": "Front Pocket", "rssi@1m": -63}
+
+    def test_set_device_single_device_readback(self, tmp_path, broker):
+        assert (
+            self._invoke(
+                tmp_path, "mqtt", "set-device", "tags:leash", '{"alias": "leash"}'
+            ).exit_code
+            == 0
+        )
+        result = self._invoke(tmp_path, "mqtt", "devices", "--device", "tags:leash")
+        out = json.loads(result.output)
+        assert out == {
+            "prefix": "espresense",
+            "device": "tags:leash",
+            "present": True,
+            "config": {"alias": "leash"},
+        }
+
+    def test_absent_device_after_a_differing_write_exits_1(self, tmp_path, broker):
+        assert self._invoke(tmp_path, "mqtt", "set-device", "dev", '{"a": 1}').exit_code == 0
+        result = self._invoke(tmp_path, "mqtt", "devices", "--device", "other")
+        assert result.exit_code == 1
+
+    def test_config_and_settings_families_do_not_bleed(self, tmp_path, broker):
+        # the global-settings write and the device-config write land next to
+        # each other under <prefix>/settings/ — neither read-back may pick
+        # the other's records up.
+        assert self._invoke(tmp_path, "mqtt", "set-global", "expiration", "300").exit_code == 0
+        assert (
+            self._invoke(tmp_path, "mqtt", "set-device", "dev", '{"name": "watch"}').exit_code == 0
+        )
+        out = json.loads(self._invoke(tmp_path, "mqtt", "devices").output)
+        assert out["count"] == 1
+        assert "dev" in out["devices"]
+        out = json.loads(self._invoke(tmp_path, "mqtt", "settings").output)
+        assert out["count"] == 1
+        assert "expiration" in out["settings"]
+
+    def test_no_retain_write_never_becomes_broker_state(self, tmp_path, broker):
+        assert self._invoke(tmp_path, "mqtt", "set-device", "dev", '{"name": "old"}').exit_code == 0
+        assert len(broker) == 1
+        assert (
+            self._invoke(
+                tmp_path, "mqtt", "set-device", "dev", '{"name": "new"}', "--no-retain"
+            ).exit_code
+            == 0
+        )
+        assert len(broker) == 2
+        assert len([r for r in broker if r["retain"]]) == 1
+        out = json.loads(self._invoke(tmp_path, "mqtt", "devices").output)
+        assert out["count"] == 1
+        assert out["devices"]["dev"] == {"name": "old"}
+
+    def test_devices_verifies_get_readback(self, tmp_path, broker):
+        assert (
+            self._invoke(tmp_path, "mqtt", "set-device", "dev", '{"name": "watch"}').exit_code == 0
+        )
+        result = self._invoke(tmp_path, "mqtt", "get", "espresense/settings/dev/config")
+        out = json.loads(result.output)
+        assert out["found"] is True
+        assert out["retained"] is True
+        assert out["payload"] == {"name": "watch"}

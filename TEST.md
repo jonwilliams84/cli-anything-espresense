@@ -4,14 +4,14 @@ The suite runs against synthetic data on disk — no live companion, cluster,
 broker or node is ever contacted.
 
 ```bash
-python3 -m pytest cli_anything/espresense/tests/ -v          # 1618 tests
+python3 -m pytest cli_anything/espresense/tests/ -v          # 1640 tests
 python3 -m pytest cli_anything/espresense/tests/ \
   --cov=cli_anything --cov-fail-under=90 -q                  # CI gate shape
 ruff check cli_anything/ && ruff format --check cli_anything/
 bandit -r cli_anything/ -ll -x '*/tests/*,*/test_*.py,*/conftest.py'
 ```
 
-Current state: **1618 tests, all four gates green (coverage 98.5%).**
+Current state: **1640 tests, all four gates green (coverage 98.4%).**
 
 ## What is covered where
 
@@ -31,7 +31,7 @@ Current state: **1618 tests, all four gates green (coverage 98.5%).**
 | **Fleet room-usage analytics (`history heatmap`)** | `test_core.py` (`TestHistoryHeatmap`) | `test_full_e2e.py` (`TestHistoryHeatmapE2E`, `TestRoomUsageWorkflow`) |
 | **Config drift detection (`config diff` running vs deployed)** | `test_core.py` (`TestConfigDiff`: scalar/nested/list diffs, index paths, secret redaction incl. list-index paths, ruamel documents) | `test_full_e2e.py` (`TestConfigDiffE2E`: identical, drift + exit 1, push-without-restart `added`, redaction, human lines, `--against` offline file-vs-file, companion-unreachable abort, `--help`; `TestConfigDiffWorkflow`: push-with-restart matches, push-without-restart drifts, `companion config-get` tells the same story) |
 | **Device distance calibration (`node calibrate`, `calibration compute`)** | `test_core.py` (`TestComputeRssiAt1m`: identity at 1 m, formula inversion, absorption scaling, sub-metre readings, ValueError guards, string inputs; `TestNodeCalibrate`: request params, HTTP error → `NodeError`, bad-JSON fallback, guards) | `test_full_e2e.py` (`TestNodeCalibrateE2E`: JSON parse, positive-distance guard, clean `NodeError` abort, `--help`; `TestCalibrationComputeE2E`: JSON shape, negative RSSI positional via `COORD_SETTINGS`, custom `--absorption`, zero-distance abort, `--help`; `TestCalibrationWorkflow`: calibrate → compute → `node config-set --rssi-at-1m`, identity at 1 m) |
-| **Retained MQTT read-back (`mqtt settings`, `mqtt get`)** | `test_core.py` (`TestParseMqttPayload`: JSON/scalars/broken-json/empty never raise; `TestRetainedFilter`, `TestLatestByTopic` (retained beats newer live), `TestMqttSettingsView` (device-config and per-node topics never misattribute), `TestWatchCarriesRetainFlag`: `watch()` records carry `msg.retain`) | `test_full_e2e.py` (`TestMqttSettingsE2E`: dump parsed + redacted, `--reveal`, `--key` present/absent + exit 1, nothing-retained message, missing-broker abort, `--help`; `TestMqttGetE2E`: retained readback, live-only warns, not-found exit 1, per-topic filtering, empty-topic abort, `--help`; `TestMqttReadbackWorkflow`: `set-global` → `settings` / `get` verify over an in-memory broker with MQTT `+`-wildcard matching, `--no-retain` writes never become stored state) |
+| **Retained MQTT read-back (`mqtt settings`, `mqtt devices`, `mqtt get`)** | `test_core.py` (`TestParseMqttPayload`: JSON/scalars/broken-json/empty never raise; `TestRetainedFilter`, `TestLatestByTopic` (retained beats newer live), `TestMqttSettingsView` (device-config and per-node topics never misattribute), `TestWatchCarriesRetainFlag`: `watch()` records carry `msg.retain`) | `test_full_e2e.py` (`TestMqttSettingsE2E`: dump parsed + redacted, `--reveal`, `--key` present/absent + exit 1, nothing-retained message, missing-broker abort, `--help`; `TestMqttGetE2E`: retained readback, live-only warns, not-found exit 1, per-topic filtering, empty-topic abort, `--help`; `TestMqttReadbackWorkflow`: `set-global` → `settings` / `get` verify over an in-memory broker with MQTT `+`-wildcard matching, `--no-retain` writes never become stored state). Per-device fingerprints: unit-tested in `test_core.py` (`TestDeviceConfigsView`: `<...>/settings/<id>/config` shape matching, settings/per-node neighbour topics never misattribution, malformed/empty topics, retained-only and `latest_by_topic` composition) and in `test_full_e2e.py` (`TestMqttDevicesE2E`: parsed dump, in-flight exclusion, human lines, `--device` present/absent + exit 1, nothing-retained, missing-broker abort, custom prefix, `--help`; `TestMqttDeviceReadbackWorkflow`: `set-device` → `devices` / `get` verify, settings- and device-config families never bleed, `--no-retain` write never becomes stored state) |
 | Docs stay in sync with the CLI | `test_docs_sync.py` | — |
 | REPL loop, prompt-toolkit skin, stream/watch edge cases, direct-node group, remaining CLI error/no-op branches | `test_refine_hardening.py` | — |
 | CLI error-path contract (`_abort`: stderr + exit 1, no traceback) and last core gaps (calibration wrappers, `FileSource` backup failure, kubectl-missing, node-direct HTTP errors, rotate validation, transport wrapping, `python -m` entry) | `test_error_paths.py` | — |

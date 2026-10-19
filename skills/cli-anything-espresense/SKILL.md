@@ -33,7 +33,7 @@ per-node ESP32 web UI, and direct MQTT — behind a single Click CLI with full
   which live outside config.yaml (`companion settings-keys/get/set`, or
   `mqtt set-global` when the REST API is unreachable), and verifying what is
   actually **retained on the broker** afterwards (`mqtt settings`,
-  `mqtt get` — the state a restart re-applies).
+  `mqtt devices`, `mqtt get` — the state a restart re-applies).
 - Inspecting one ESP node's status, settings, or seen-devices list by IP.
 - Renaming the OTA hostname of a physical ESP node.
 - Streaming live device-position events from the companion.
@@ -80,7 +80,7 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `settings` | `settings show`, `settings show --section mqtt`, `settings get locators.nelder_mead.enabled`, `settings set away_timeout 300`, `settings unset weighting.algorithm`, `settings locators`, `settings locator nadaraya_watson off`, `settings optimizers`, `settings optimizer absorption off` |
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on`, `calibration compute <rssi> <metres> [--absorption N]` (pure maths: a reading taken at a known distance → the `rssi@1m` config value; RSSI is signed, pass it like coordinates) |
 | `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50`, `history trail <device-id>` (movement summary: room segments per visit, first/last seen, rooms visited), `history heatmap [--device <id>]... [--limit N]` (room usage across all tracked devices: points, visits, dwell seconds, devices per room, most-used first) |
-| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt settings [--key <k>] [--reveal]` (read back every retained global setting, parsed + secrets redacted; exits 1 for an absent `--key`), `mqtt get <topic>` (read back any single topic's retained/live value; exits 1 when nothing there), `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt node-status` (online/offline), `mqtt telemetry [--node <id>]` (node health snapshot: uptime, free memory, RSSI, version) |
+| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt settings [--key <k>] [--reveal]` (read back every retained global setting, parsed + secrets redacted; exits 1 for an absent `--key`), `mqtt devices [--device <id>]` (read back every retained per-device config on `<prefix>/settings/+/config` — the bulk read-back of `mqtt set-device`; `--device <id>` exits 1 while absent), `mqtt get <topic>` (read back any single topic's retained/live value; exits 1 when nothing there), `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt node-status` (online/offline), `mqtt telemetry [--node <id>]` (node health snapshot: uptime, free memory, RSSI, version) |
 | `config` | `config show`, `config save`, `config doctor --file cfg.yaml`, `config diff [--against draft.yaml] [--file cfg.yaml]` (running-vs-deployed drift, exits 1 on differences) |
 | `repl` | Interactive shell (default with no subcommand) |
 
