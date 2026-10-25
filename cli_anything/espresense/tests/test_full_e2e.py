@@ -57,6 +57,27 @@ TELEM_RECORDS = [
     },
 ]
 
+# JSON sightings on the bare <room>/devices/<id> topic (rssi, distance,
+# expRssi), next to bare-number payloads on the /distance subtopic.
+SIGHTING_RECORDS = [
+    {
+        "topic": "espresense/rooms/kitchen/devices/d1",
+        "payload": '{"id": "d1", "name": "Phone", "rssi": -61, "distance": 4.9, "expRssi": -75}',
+        "ts": 20.0,
+    },
+    {
+        "topic": "espresense/rooms/kitchen/devices/d1",
+        "payload": '{"rssi": "-58", "distance": "4.5"}',
+        "ts": 21.0,
+    },
+    {
+        "topic": "espresense/rooms/hall/devices/d1",
+        "payload": '{"rssi": -85, "distance": 1.2}',
+        "ts": 22.0,
+    },
+    {"topic": "espresense/rooms/hall/devices/d1/distance", "payload": "1.3", "ts": 23.0},
+]
+
 
 # ── devices whereis ──────────────────────────────────────────────────────────
 
@@ -442,6 +463,140 @@ class TestPresenceWorkflow:
         assert where.exit_code == 0 and occ.exit_code == 0
         room = json.loads(where.output)["room"]
         assert room in json.loads(occ.output)["rooms"]
+
+
+# ── mqtt sightings ───────────────────────────────────────────────────────────
+
+
+class TestMqttSightingsE2E:
+    def test_requires_broker(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "sightings"])
+        assert result.exit_code == 1
+        assert "no MQTT broker" in result.output
+
+    def test_json_snapshot(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.core.telemetry.mqtt_core.watch",
+            return_value=SIGHTING_RECORDS,
+        ) as mock_watch:
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "mqtt", "sightings", "--duration", "3"]
+            )
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["topic_filter"] == "espresense/rooms/+/devices/+"
+        assert out["duration"] == 3
+        assert out["messages"] == 3  # the bare-number /distance payload is not a sighting
+        kitchen = out["devices"]["d1"]["kitchen"]
+        assert kitchen["samples"] == 2
+        assert kitchen["latest"]["rssi"] == -58
+        # latest is the record as published — the second sighting had no name
+        assert kitchen["latest"] == {"rssi": -58, "distance": 4.5}
+        assert kitchen["min_rssi"] == -61
+        assert out["strongest"]["d1"] == "kitchen"
+        assert out["closest"]["d1"] == "hall"
+        mock_watch.assert_called_once()
+
+    def test_filters_reach_the_snapshot(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch("cli_anything.espresense.core.telemetry.mqtt_core.watch", return_value=[]):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--config",
+                    str(cfg),
+                    "--json",
+                    "mqtt",
+                    "sightings",
+                    "--device",
+                    "d1",
+                    "--room",
+                    "kitchen",
+                    "--prefix",
+                    "home",
+                ],
+            )
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["topic_filter"] == "home/rooms/+/devices/+"
+        assert out["devices"] == {}
+
+    def test_human_output_renders_the_signal_table(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.core.telemetry.mqtt_core.watch",
+            return_value=SIGHTING_RECORDS,
+        ):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "sightings"])
+        assert result.exit_code == 0
+        assert "kitchen" in result.output
+        assert "strongest" in result.output
+        assert "True" in result.output
+
+    def test_human_output_when_nothing_heard(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch("cli_anything.espresense.core.telemetry.mqtt_core.watch", return_value=[]):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "sightings"])
+        assert result.exit_code == 0
+        assert "no device sightings heard in the window" in result.output
+
+    def test_help(self):
+        result = CliRunner().invoke(cli, ["mqtt", "sightings", "--help"])
+        assert result.exit_code == 0
+        assert "rssi" in result.output.lower()
+
+
+class TestSightingsWorkflow:
+    """sightings and distances listen on the same topic but answer different
+    questions: distance rows carry the metres, sighting rows carry the signal
+    picture (rssi/exp_rssi) behind them."""
+
+    def test_sightings_and_distances_agree_on_rooms(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.core.telemetry.mqtt_core.watch",
+            return_value=SIGHTING_RECORDS,
+        ):
+            sight = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "mqtt", "sightings", "--duration", "1"]
+            )
+            dist = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "mqtt", "distances", "--duration", "1"]
+            )
+        assert sight.exit_code == 0 and dist.exit_code == 0
+        sight_out = json.loads(sight.output)
+        dist_out = json.loads(dist.output)
+        # same device, same rooms — the two views share the topic family
+        assert list(sight_out["devices"]) == list(dist_out["devices"])
+        assert list(sight_out["devices"]["d1"]) == list(dist_out["devices"]["d1"])
+        # distances only understands a numeric `distance` field — the second
+        # sighting's string-valued one is invisible to it; sightings coerces
+        # the same payload and keeps the rssi the distance view drops
+        assert dist_out["devices"]["d1"]["kitchen"]["samples"] == 1
+        assert sight_out["devices"]["d1"]["kitchen"]["samples"] == 2
+        assert sight_out["devices"]["d1"]["kitchen"]["latest"]["rssi"] == -58
+        assert "rssi" not in dist_out["devices"]["d1"]["kitchen"]
+
+    def test_human_table_covers_every_device_in_the_json_snapshot(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.core.telemetry.mqtt_core.watch",
+            return_value=SIGHTING_RECORDS,
+        ):
+            res = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "sightings"])
+            snap = CliRunner().invoke(cli, ["--config", str(cfg), "--json", "mqtt", "sightings"])
+        assert res.exit_code == 0 and snap.exit_code == 0
+        for dev in json.loads(snap.output)["devices"]:
+            assert dev in res.output
 
 
 # ── history trail ────────────────────────────────────────────────────────────

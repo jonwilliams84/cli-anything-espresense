@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.13.0] — 2026-10-25
+
+- The MQTT presence family gains its signal half: **`mqtt sightings`**.
+  `mqtt distances` listens on `<prefix>/rooms/+/devices/+` and answers "at
+  what *distance* does each room see this device?" — but ESPresense also
+  publishes a full JSON sighting per room per device on
+  `<prefix>/rooms/<room>/devices/<id>` (rssi, distance, expected rssi),
+  and until now those fields were only reachable by scraping the
+  `mqtt watch` firehose. That rssi/exp_rssi half is the evidence an
+  operator needs when tuning a room's `rssi@1m` calibration: a room can
+  report a plausible distance while barely hearing the device at all.
+  - `mqtt sightings [--device <id>] [--room <id>] [--duration N] [--prefix P]`
+    listens on the **same topic filter** as `mqtt distances` and aggregates
+    the JSON sightings: per (device, room) — sample count, min/max rssi,
+    min/max distance, the latest full payload and `last_ts`; per device —
+    `strongest` (the room whose latest rssi is best, which is *not* always
+    the closest room) and `closest` (smallest latest distance). The rows
+    view is ordered closest-first with both facts flagged, so "is the
+    kitchen hearing me or guessing me?" is one command away.
+  - Parsing follows the house rules: `_parse_sighting_topic` matches only
+    the exact bare 4-segment shape, so `.../distance`, `.../distance_raw`,
+    telemetry, status and settings topics folded into the same collection
+    can never become sightings (a bare-number distance payload is
+    deliberately not a sighting); `parse_sighting_payload` normalises
+    firmware spelling drift (`expRssi`→`exp_rssi`, `adjRssi`→`adj_rssi` à la
+    `parse_telemetry_payload`), coerces numeric strings, passes unknown
+    keys through so a newer firmware's extra fields stay visible, and
+    rejects anything that is not a JSON object.
+  - Unit-tested in `test_core.py` (`TestParseSightingPayload`,
+    `TestSightingTopicParsing`, `TestAggregateSightings` incl.
+    strongest≠closest and rssi-less/distance-less devices,
+    `TestSightingsRows`, `TestSightingsSnapshot`); CLI behaviour pinned in
+    `test_full_e2e.py` (`TestMqttSightingsE2E`: missing-broker abort, JSON
+    snapshot, `--device`/`--room`/`--prefix` filters, human signal table,
+    nothing-heard line, `--help`; `TestSightingsWorkflow`: sightings and
+    distances agree on which devices were seen in which rooms, and the
+    human table covers every device the JSON snapshot reports).
+- Docs updated: both READMEs, both SKILL.md copies (kept byte-identical),
+  TEST.md, CLAUDE.md.
+
 ## [0.12.0] — 2026-10-19
 
 - The retained read-back family is complete. v0.11.0 gave `mqtt set-*` its

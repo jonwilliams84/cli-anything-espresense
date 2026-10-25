@@ -2392,6 +2392,45 @@ def mqtt_distances(ctx, device_id, node_id, duration, prefix):
     emit(ctx, telemetry_core.distance_rows(out))
 
 
+@mqtt.command("sightings")
+@click.option("--device", "device_id", default=None, help="Only this device id")
+@click.option("--room", "room_id", default=None, help="Only this room id")
+@click.option("--duration", default=5.0, type=float, help="Seconds to listen (default: 5)")
+@click.option("--prefix", default=None, help="Topic prefix (default: espresense)")
+@click.pass_context
+def mqtt_sightings(ctx, device_id, room_id, duration, prefix):
+    """Per-device sighting detail from <prefix>/rooms/+/devices/+.
+
+    Next to the bare-number distance on
+    <prefix>/rooms/<room>/devices/<id>/distance, ESPresense publishes a JSON
+    sighting — rssi, distance, expected rssi — on
+    <prefix>/rooms/<room>/devices/<id>. That rssi/exp_rssi half is what
+    `mqtt distances` cannot show: whether a room actually hears a device
+    strongly or just reports a plausible distance — the evidence you need
+    when tuning a room's rssi@1m calibration. Same topic filter as
+    `mqtt distances`; this gives the signal table.
+
+    Example:
+      mqtt sightings --device apple:1005:9-12 --duration 5
+    """
+    kw = _mqtt_args(ctx)
+    out = telemetry_core.sightings_snapshot(
+        duration=duration,
+        prefix=prefix or ctx.obj.get("mqtt_topic_prefix", "espresense"),
+        device_id=device_id,
+        room=room_id,
+        **kw,
+    )
+    if ctx.obj.get("as_json"):
+        emit(ctx, out)
+        return
+    rows = telemetry_core.sightings_rows(out)
+    if not rows:
+        click.echo("no device sightings heard in the window")
+        return
+    emit(ctx, rows)
+
+
 @mqtt.command("node-status")
 @click.option("--duration", default=5.0, type=float, help="Seconds to listen (default: 5)")
 @click.option("--prefix", default=None, help="Topic prefix (default: espresense)")

@@ -1181,6 +1181,230 @@ class TestTelemetrySnapshot:
         assert out["nodes_reporting"] == ["kitchen"]
 
 
+# ── device sightings (v0.13.0) ────────────────────────────────────────────────
+
+
+def _sight_rec(topic, payload, ts=1.0):
+    return {"topic": topic, "payload": payload, "ts": ts}
+
+
+class TestParseSightingPayload:
+    def test_full_sighting_is_canonicalised(self):
+        out = telemetry_core.parse_sighting_payload(
+            '{"id": "d1", "name": "Dev", "rssi": -61, "distance": 2.4, "expRssi": -75}'
+        )
+        assert out == {"id": "d1", "name": "Dev", "rssi": -61, "distance": 2.4, "exp_rssi": -75}
+
+    def test_adj_rssi_alias_is_normalised(self):
+        out = telemetry_core.parse_sighting_payload('{"adjRssi": -63, "rssi": -60}')
+        assert out["adj_rssi"] == -63
+        assert "adjRssi" not in out
+
+    def test_numeric_strings_are_coerced(self):
+        out = telemetry_core.parse_sighting_payload('{"rssi": "-62.5", "distance": "3"}')
+        assert out["rssi"] == -62.5
+        assert out["distance"] == 3
+
+    def test_unknown_keys_pass_through(self):
+        out = telemetry_core.parse_sighting_payload('{"rssi": -60, "futureField": {"a": 1}}')
+        assert out["futureField"] == {"a": 1}
+
+    def test_missing_rssi_is_accepted(self):
+        out = telemetry_core.parse_sighting_payload('{"name": "Dev"}')
+        assert out == {"name": "Dev"}
+
+    def test_non_numeric_rssi_string_is_rejected(self):
+        assert telemetry_core.parse_sighting_payload('{"rssi": "strong"}') is None
+
+    def test_bare_number_distance_payload_is_rejected(self):
+        assert telemetry_core.parse_sighting_payload("3.4") is None
+
+    def test_broken_json_is_rejected(self):
+        assert telemetry_core.parse_sighting_payload('{"rssi": -6') is None
+
+    def test_empty_payload_is_rejected(self):
+        assert telemetry_core.parse_sighting_payload("") is None
+        assert telemetry_core.parse_sighting_payload("  ") is None
+
+    def test_null_payload_is_rejected(self):
+        assert telemetry_core.parse_sighting_payload(None) is None
+
+
+class TestSightingTopicParsing:
+    def test_bare_device_topic_matches(self):
+        assert telemetry_core._parse_sighting_topic(
+            "espresense/rooms/kitchen/devices/d1", "espresense"
+        ) == ("kitchen", "d1")
+
+    def test_distance_subtopic_is_rejected(self):
+        assert (
+            telemetry_core._parse_sighting_topic(
+                "espresense/rooms/kitchen/devices/d1/distance", "espresense"
+            )
+            is None
+        )
+
+    def test_distance_raw_subtopic_is_rejected(self):
+        assert (
+            telemetry_core._parse_sighting_topic(
+                "espresense/rooms/kitchen/devices/d1/distance_raw", "espresense"
+            )
+            is None
+        )
+
+    def test_neighbour_families_never_become_sightings(self):
+        for topic in (
+            "espresense/rooms/kitchen/telemetry",
+            "espresense/rooms/kitchen/status",
+            "espresense/settings/gps/set",
+            "espresense/settings/d1/config",
+            "other/rooms/kitchen/devices/d1",
+            "espresense/rooms/kitchen/devices",
+            "espresense/rooms//devices/d1",
+            "espresense/rooms/kitchen/devices/",
+        ):
+            assert telemetry_core._parse_sighting_topic(topic, "espresense") is None
+
+    def test_custom_prefix(self):
+        assert telemetry_core._parse_sighting_topic("home/rooms/hall/devices/d1", "home") == (
+            "hall",
+            "d1",
+        )
+
+
+class TestAggregateSightings:
+    def test_empty_records(self):
+        out = telemetry_core.aggregate_sightings([])
+        assert out["devices"] == {}
+        assert out["messages"] == 0
+        assert out["strongest"] == {}
+        assert out["closest"] == {}
+
+    def test_samples_min_max_latest_and_ts(self):
+        records = [
+            _sight_rec(
+                "espresense/rooms/kitchen/devices/d1", '{"rssi": -61, "distance": 2.4}', 10.0
+            ),
+            _sight_rec(
+                "espresense/rooms/kitchen/devices/d1", '{"rssi": -58, "distance": 2.1}', 11.0
+            ),
+        ]
+        out = telemetry_core.aggregate_sightings(records)
+        entry = out["devices"]["d1"]["kitchen"]
+        assert entry["samples"] == 2
+        assert entry["min_rssi"] == -61
+        assert entry["max_rssi"] == -58
+        assert entry["min_distance"] == 2.1
+        assert entry["max_distance"] == 2.4
+        assert entry["last_ts"] == 11.0
+        assert entry["latest"] == {"rssi": -58, "distance": 2.1}
+
+    def test_distance_records_in_the_same_collection_are_ignored(self):
+        records = [
+            _sight_rec("espresense/rooms/kitchen/devices/d1", '{"rssi": -61, "distance": 2.4}'),
+            _sight_rec("espresense/rooms/kitchen/devices/d1/distance", "4.5"),
+            _sight_rec("espresense/rooms/kitchen/devices/d1/distance_raw", "4.5"),
+            _sight_rec("espresense/rooms/kitchen/telemetry", '{"uptime": 9}'),
+        ]
+        out = telemetry_core.aggregate_sightings(records)
+        assert out["messages"] == 1
+        assert list(out["devices"]) == ["d1"]
+
+    def test_device_and_room_filters(self):
+        records = [
+            _sight_rec("espresense/rooms/kitchen/devices/d1", '{"rssi": -61, "distance": 2.4}'),
+            _sight_rec("espresense/rooms/hall/devices/d1", '{"rssi": -70, "distance": 4.0}'),
+            _sight_rec("espresense/rooms/hall/devices/d2", '{"rssi": -60, "distance": 1.0}'),
+        ]
+        out = telemetry_core.aggregate_sightings(records, device_id="d1", room="hall")
+        assert list(out["devices"]) == ["d1"]
+        assert list(out["devices"]["d1"]) == ["hall"]
+
+    def test_strongest_and_closest_are_computed_per_device(self):
+        records = [
+            _sight_rec("espresense/rooms/kitchen/devices/d1", '{"rssi": -61, "distance": 4.9}'),
+            _sight_rec("espresense/rooms/hall/devices/d1", '{"rssi": -85, "distance": 1.2}'),
+        ]
+        out = telemetry_core.aggregate_sightings(records)
+        assert out["strongest"]["d1"] == "kitchen"
+        assert out["closest"]["d1"] == "hall"
+
+    def test_device_without_rssi_still_gets_closest(self):
+        records = [
+            _sight_rec("espresense/rooms/kitchen/devices/d1", '{"distance": 2.0}'),
+            _sight_rec("espresense/rooms/hall/devices/d1", '{"distance": 5.0}'),
+        ]
+        out = telemetry_core.aggregate_sightings(records)
+        assert out["strongest"]["d1"] is None
+        assert out["closest"]["d1"] == "kitchen"
+
+    def test_rssi_only_device_gets_strongest_but_no_closest(self):
+        records = [
+            _sight_rec("espresense/rooms/kitchen/devices/d1", '{"rssi": -60}'),
+            _sight_rec("espresense/rooms/hall/devices/d1", '{"rssi": -55}'),
+        ]
+        out = telemetry_core.aggregate_sightings(records)
+        assert out["strongest"]["d1"] == "hall"
+        assert out["closest"]["d1"] is None
+
+
+class TestSightingsRows:
+    def test_rows_are_ordered_closest_first_and_flagged_once(self):
+        records = [
+            _sight_rec("espresense/rooms/kitchen/devices/d1", '{"rssi": -61, "distance": 4.9}'),
+            _sight_rec("espresense/rooms/hall/devices/d1", '{"rssi": -85, "distance": 1.2}'),
+        ]
+        rows = telemetry_core.sightings_rows(telemetry_core.aggregate_sightings(records))
+        assert [r["room"] for r in rows] == ["hall", "kitchen"]
+        hall, kitchen = rows
+        assert hall["closest"] is True and hall["strongest"] is False
+        assert kitchen["strongest"] is True and kitchen["closest"] is False
+        assert hall["samples"] == 1
+
+    def test_multiple_devices_are_separate_groups(self):
+        records = [
+            _sight_rec("espresense/rooms/kitchen/devices/d1", '{"rssi": -61, "distance": 4.9}'),
+            _sight_rec("espresense/rooms/hall/devices/d2", '{"rssi": -55, "distance": 1.0}'),
+        ]
+        rows = telemetry_core.sightings_rows(telemetry_core.aggregate_sightings(records))
+        assert [(r["device"], r["room"]) for r in rows] == [("d1", "kitchen"), ("d2", "hall")]
+
+    def test_room_without_distance_sorts_last(self):
+        records = [
+            _sight_rec("espresense/rooms/kitchen/devices/d1", '{"rssi": -61}'),
+            _sight_rec("espresense/rooms/hall/devices/d1", '{"rssi": -70, "distance": 3.0}'),
+        ]
+        rows = telemetry_core.sightings_rows(telemetry_core.aggregate_sightings(records))
+        assert [r["room"] for r in rows] == ["hall", "kitchen"]
+
+    def test_empty_snapshot_gives_no_rows(self):
+        assert telemetry_core.sightings_rows({"devices": {}}) == []
+
+
+class TestSightingsSnapshot:
+    def test_subscribes_to_the_devices_topic_filter(self):
+        with patch.object(mqtt_core, "watch", return_value=[]) as mock_watch:
+            out = telemetry_core.sightings_snapshot("broker.local", duration=2.0)
+        mock_watch.assert_called_once_with(
+            "broker.local",
+            "espresense/rooms/+/devices/+",
+            port=1883,
+            username=None,
+            password=None,
+            duration=2.0,
+        )
+        assert out["topic_filter"] == "espresense/rooms/+/devices/+"
+        assert out["duration"] == 2.0
+        assert out["prefix"] == "espresense"
+
+    def test_filters_are_forwarded(self):
+        with patch.object(mqtt_core, "watch", return_value=[]) as mock_watch:
+            telemetry_core.sightings_snapshot(
+                "broker.local", device_id="d1", room="kitchen", prefix="home"
+            )
+        assert mock_watch.call_args[0][1] == "home/rooms/+/devices/+"
+
+
 class TestHistoryHeatmap:
     """Pure fleet-level room-usage aggregation behind `history heatmap`."""
 

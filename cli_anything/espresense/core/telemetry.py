@@ -12,6 +12,8 @@ those questions into structured answers:
                         (`<prefix>/rooms/<node>/status`, retained by nodes)
 - `telemetry_snapshot` — node health: uptime, free memory, wifi RSSI, firmware
                         version, IP (`<prefix>/rooms/<node>/telemetry`)
+- `sightings_snapshot` — per-room device sighting detail: rssi, distance,
+                        expected rssi (`<prefix>/rooms/+/devices/+` JSON topic)
 - `occupancy`         — which tracked devices are currently in which room
 
 Everything that touches the broker goes through `mqtt.watch`; everything else
@@ -414,6 +416,225 @@ def telemetry_snapshot(
         duration=duration,
     )
     out = aggregate_node_telemetry(records, prefix=prefix, node_id=node_id)
+    out.update({"topic_filter": topic_filter, "duration": duration, "prefix": prefix})
+    return out
+
+
+# ── device sightings ─────────────────────────────────────────────────────────
+
+# Next to the bare-number `.../devices/<id>/distance` topic ESPresense
+# publishes a full JSON sighting per room per device on
+# `<prefix>/rooms/<room>/devices/<id>`: rssi, distance, expected rssi — the
+# fields the distance topic does not carry, and the evidence an operator
+# needs when tuning a room's rssi@1m calibration. Spelling has drifted
+# across firmware versions (`expRssi` vs `exp_rssi`), so known keys are
+# normalised the same way `_TELEMETRY_ALIASES` does it, and unknown keys
+# pass through so a newer firmware's extra fields stay visible.
+_SIGHTING_ALIASES = {
+    "rssi": "rssi",
+    "expRssi": "exp_rssi",
+    "exp_rssi": "exp_rssi",
+    "adjRssi": "adj_rssi",
+    "adj_rssi": "adj_rssi",
+    "distance": "distance",
+    "name": "name",
+    "id": "id",
+}
+_SIGHTING_NUMERIC = ("rssi", "exp_rssi", "adj_rssi", "distance")
+
+
+def parse_sighting_payload(payload: str) -> Optional[dict]:
+    """Parse an MQTT device-sighting message, or None if it is not one.
+
+    A sighting is a JSON object per room per device; numeric fields may
+    arrive as bare numbers or numeric strings (firmware has shipped both).
+    Anything that is not a JSON object — the bare-number distance payloads
+    on the sibling `/distance` topic included — is rejected so a snapshot
+    only ever contains real sightings.
+    """
+    text = (payload or "").strip()
+    if not text:
+        return None
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    out: dict = {}
+    for k, v in obj.items():
+        canon = _SIGHTING_ALIASES.get(k, k)
+        if canon in _SIGHTING_NUMERIC and isinstance(v, str):
+            try:
+                v = float(v) if "." in v else int(v)
+            except ValueError:
+                return None
+        out[canon] = v
+    return out
+
+
+def _parse_sighting_topic(topic: str, prefix: str) -> Optional[tuple[str, str]]:
+    """Extract (room, device_id) from `<prefix>/rooms/<room>/devices/<id>`.
+
+    Only the exact bare shape counts: the `/distance` and `/distance_raw`
+    subtopics, a telemetry or status topic folded into the same collection
+    can never become a sighting.
+    """
+    rest = _strip_prefix(topic or "", prefix)
+    if rest is None:
+        return None
+    parts = rest.split("/")
+    if len(parts) != 4 or parts[0] != "rooms" or parts[2] != "devices":
+        return None
+    if not parts[1] or not parts[3]:
+        return None
+    return parts[1], parts[3]
+
+
+def aggregate_sightings(
+    records: list[dict],
+    *,
+    prefix: str = "espresense",
+    device_id: Optional[str] = None,
+    room: Optional[str] = None,
+) -> dict:
+    """Aggregate raw `mqtt.watch` records into per-device/per-room sightings.
+
+    Each surviving (device, room) pair keeps its sample count, the most
+    recent and worst-case rssi (min/max), the most recent and min/max
+    distance, and the full latest payload (`latest`) plus `last_ts`.
+    Records that do not match the topic shape, the requested device/room,
+    or a parseable sighting payload are dropped — one chatty or malformed
+    topic never corrupts the snapshot. Each device also gets `strongest`
+    (the room whose latest rssi is closest to 0 — the best signal, which is
+    not always the closest room) and `closest` (the room with the smallest
+    latest distance), mirroring `distance_snapshot`'s `nearest`.
+    """
+    devices: dict[str, dict[str, dict]] = {}
+    messages = 0
+    for rec in records:
+        parsed = _parse_sighting_topic(rec.get("topic", ""), prefix)
+        if parsed is None:
+            continue
+        room_name, dev = parsed
+        if device_id is not None and dev != device_id:
+            continue
+        if room is not None and room_name != room:
+            continue
+        sighting = parse_sighting_payload(rec.get("payload", ""))
+        if sighting is None:
+            continue
+        messages += 1
+        entry = devices.setdefault(dev, {}).setdefault(
+            room_name,
+            {"samples": 0, "latest": None, "last_ts": rec.get("ts")},
+        )
+        entry["samples"] += 1
+        rssi = sighting.get("rssi")
+        if rssi is not None:
+            for key, cmp in (("min_rssi", min), ("max_rssi", max)):
+                old = entry.get(key)
+                entry[key] = rssi if old is None else cmp(old, rssi)
+        dist = sighting.get("distance")
+        if dist is not None:
+            for key, cmp in (("min_distance", min), ("max_distance", max)):
+                old = entry.get(key)
+                entry[key] = dist if old is None else cmp(old, dist)
+        if rec.get("ts") is not None:
+            entry["last_ts"] = rec["ts"]
+        entry["latest"] = sighting
+    ranked_devices: dict[str, dict] = {}
+    for dev, rooms in devices.items():
+        rssi_rooms = [
+            (r, e["latest"]["rssi"])
+            for r, e in rooms.items()
+            if isinstance(e["latest"].get("rssi"), (int, float))
+        ]
+        dist_rooms = [
+            (r, e["latest"]["distance"])
+            for r, e in rooms.items()
+            if isinstance(e["latest"].get("distance"), (int, float))
+        ]
+        ranked_devices[dev] = {
+            "strongest": max(rssi_rooms, key=lambda kv: kv[1])[0] if rssi_rooms else None,
+            "closest": min(dist_rooms, key=lambda kv: kv[1])[0] if dist_rooms else None,
+        }
+    return {
+        "devices": devices,
+        "messages": messages,
+        "strongest": {d: r["strongest"] for d, r in ranked_devices.items()},
+        "closest": {d: r["closest"] for d, r in ranked_devices.items()},
+    }
+
+
+def sightings_rows(snapshot: dict) -> list[dict]:
+    """Flatten a sightings snapshot into table rows.
+
+    Rooms are ordered by latest distance (closest first) per device, and the
+    row is flagged when it is that device's strongest-signal or closest room
+    — the pair of facts that answers "is the kitchen hearing me or guessing
+    me?".
+    """
+    rows: list[dict] = []
+    for dev in sorted(snapshot.get("devices", {})):
+        strongest = snapshot.get("strongest", {}).get(dev)
+        closest = snapshot.get("closest", {}).get(dev)
+        rooms = snapshot["devices"][dev]
+        ordered = sorted(
+            rooms.items(),
+            key=lambda kv: (
+                kv[1]["latest"].get("distance") is None,
+                kv[1]["latest"].get("distance")
+                if kv[1]["latest"].get("distance") is not None
+                else 0.0,
+            ),
+        )
+        for room_name, entry in ordered:
+            latest = entry["latest"]
+            rows.append(
+                {
+                    "device": dev,
+                    "room": room_name,
+                    "rssi": latest.get("rssi"),
+                    "exp_rssi": latest.get("exp_rssi"),
+                    "distance": latest.get("distance"),
+                    "samples": entry["samples"],
+                    "strongest": room_name == strongest,
+                    "closest": room_name == closest,
+                }
+            )
+    return rows
+
+
+def sightings_snapshot(
+    host: str,
+    *,
+    duration: float = 5.0,
+    prefix: str = "espresense",
+    device_id: Optional[str] = None,
+    room: Optional[str] = None,
+    port: int = 1883,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> dict:
+    """Subscribe to `<prefix>/rooms/+/devices/+` for `duration` seconds.
+
+    The same filter `distance_snapshot` listens on — the JSON sighting topic
+    sits right next to the bare-number distance topic — but this returns the
+    full signal picture (rssi, exp_rssi, distance) per room per device
+    instead of distances alone. The readable counterpart to scraping the raw
+    `mqtt watch` firehose.
+    """
+    topic_filter = f"{prefix}/rooms/+/devices/+"
+    records = mqtt_core.watch(
+        host,
+        topic_filter,
+        port=port,
+        username=username,
+        password=password,
+        duration=duration,
+    )
+    out = aggregate_sightings(records, prefix=prefix, device_id=device_id, room=room)
     out.update({"topic_filter": topic_filter, "duration": duration, "prefix": prefix})
     return out
 

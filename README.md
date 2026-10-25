@@ -52,7 +52,7 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 | `devices` | `list / show / set / delete / whereis / occupancy` — tracked devices (phones, tags, beacons), incl. last-known position and live room occupancy |
 | `calibration` | `get / summary / reset / auto-optimize / compute` — calibration matrix + autocalibration, plus a pure `compute` command turning a measured RSSI at a known distance into the `rssi@1m` value config.yaml wants |
 | `history` | `get / trail / heatmap` — per-device position history, a movement summary (room segments per visit, first/last seen, rooms visited in order), and a fleet-level room-usage heatmap (points, visits, dwell seconds and devices per room, across all tracked devices) |
-| `mqtt` | `set-node / set-device / set-global / pub / watch / get / settings / devices / distances / node-status / telemetry` — raw MQTT pub/sub, read-back of retained broker state (any topic, the whole global-settings table and the whole per-device config table, with secrets redacted where applicable), plus aggregated live snapshots (node→device distances, node online/offline, node health: uptime / free memory / RSSI / version) |
+| `mqtt` | `set-node / set-device / set-global / pub / watch / get / settings / devices / distances / sightings / node-status / telemetry` — raw MQTT pub/sub, read-back of retained broker state (any topic, the whole global-settings table and the whole per-device config table, with secrets redacted where applicable), plus aggregated live snapshots (node→device distances, per-room device sighting detail with rssi/exp_rssi + strongest/closest room, node online/offline, node health: uptime / free memory / RSSI / version) |
 | `config` | `show / save` (local connection profile) + `doctor` (validate config.yaml) + `diff` (running-vs-deployed drift, exits 1 on differences) |
 | `repl` | Interactive shell (default with no subcommand) |
 
@@ -389,7 +389,7 @@ the file on start, hence the `--restart` flag on every mutating command.
 python3 -m pytest cli_anything/espresense/tests/ -v
 ```
 
-1618 tests, 98.5% coverage — all against synthetic data on disk, no live
+1676 tests, 98.4% coverage — all against synthetic data on disk, no live
 broker, cluster or companion required. They cover the YAML round-trip, room
 rename + rotate (including atomic cycles and trailing-whitespace handling),
 the polygon/bounds maths (including the cases where two rooms must *not* be
