@@ -133,6 +133,11 @@ cli-anything-espresense devices occupancy --floor first
 cli-anything-espresense mqtt distances --duration 10
 cli-anything-espresense mqtt distances --device apple:1005:9-12 --duration 5
 
+# the signal picture behind those distances: rssi / exp_rssi per room per
+# device (the JSON sighting topic — evidence for tuning a room's rssi@1m)
+cli-anything-espresense mqtt sightings --duration 5
+cli-anything-espresense mqtt sightings --device apple:1005:9-12 --json
+
 # which nodes are online? (retained <prefix>/rooms/<node>/status)
 cli-anything-espresense mqtt node-status
 
@@ -152,7 +157,14 @@ count, with the closest node flagged. `mqtt telemetry` subscribes to
 count, worst-case readings over the window (max uptime, min free memory, min
 RSSI) and the most recent full payload, with the lowest-memory node flagged in
 `lowest_free_mem`. Both are the readable counterparts to `mqtt
-watch`, which stays available for the raw feed. `devices whereis` exits 1 when
+watch`, which stays available for the raw feed. `mqtt sightings` listens on
+the same `<prefix>/rooms/+/devices/+` filter as `mqtt distances`, but instead
+of the bare-number distance payloads it parses the JSON sighting topic
+(`<prefix>/rooms/<room>/devices/<id>`): per device and room, sample count,
+min/max rssi, the latest full payload (rssi, distance, exp_rssi) and — per
+device — the `strongest` room (best latest rssi) and the `closest` room
+(smallest latest distance), so you can see whether a room actually *hears* a
+device strongly or merely reports a plausible distance. `devices whereis` exits 1 when
 the device has never been seen (but still emits `{"found": false}` JSON), so it
 can gate a script like `rooms locate` does.
 
@@ -396,7 +408,7 @@ is the `absorption` setting) for a reading you took at a known distance.
 | `history heatmap` | Fleet-level room usage: folds every tracked device's history into one table per room — points, visits (re-entries count), dwell seconds (visit spans, a lower bound) and the devices that visited, sorted most-used first. `--device` narrows to specific devices |
 | `mqtt set-node / set-device / set-global / pub / watch` | Raw MQTT pub/sub |
 | `mqtt get / settings / devices` | Read-back of retained broker state: any single topic (`get`), the whole global-settings table parsed + redacted (`settings`), or every retained per-device config fingerprint at once (`devices`, gate with `--device <id>`) |
-| `mqtt distances / node-status / telemetry` | Aggregated live snapshots: node→device distances, node online/offline status, node health (uptime / free memory / RSSI / version) |
+| `mqtt distances / sightings / node-status / telemetry` | Aggregated live snapshots: node→device distances, per-room device sighting detail (rssi / exp_rssi, strongest + closest room), node online/offline status, node health (uptime / free memory / RSSI / version) |
 | `config show / save / doctor / diff` | Local connection profile + config.yaml validation; `diff` compares the companion's running config against the deployed file and reports the drift as dotted paths (exits 1 on differences) |
 | `repl` | Interactive shell (default if no subcommand) |
 
@@ -426,7 +438,7 @@ cli_anything/espresense/
 │   ├── config_devices.py    # the `devices:` block of config.yaml
 │   ├── settings.py          # dotted-path tuning edits (timeouts, mqtt, locators)
 │   ├── global_settings.py   # deployment-wide settings: /api/settings + MQTT mirror
-│   ├── telemetry.py         # live queries: whereis, distance/status/telemetry snapshots, occupancy
+│   ├── telemetry.py         # live queries: whereis, distance/sighting/status/telemetry snapshots, occupancy
 │   ├── calibration.py
 │   ├── history.py
 │   ├── stream.py            # /ws WebSocket consumer

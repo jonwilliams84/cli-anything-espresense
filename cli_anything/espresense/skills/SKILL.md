@@ -40,7 +40,8 @@ per-node ESP32 web UI, and direct MQTT — behind a single Click CLI with full
 - Answering presence questions without a firehose: where a device was last
   seen (`devices whereis`), who is in which room right now
   (`devices occupancy`), which nodes hear a device and at what distance
-  (`mqtt distances`), and which nodes are online (`mqtt node-status`).
+  (`mqtt distances`), which rooms *hear* it best by signal strength, not just
+  metres (`mqtt sightings`), and which nodes are online (`mqtt node-status`).
 - Asking which rooms actually get used: `history heatmap` folds every
   tracked device's history into one usage table per room (points, visits,
   dwell seconds, devices) — validating sensor placement without scripting
@@ -80,7 +81,7 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `settings` | `settings show`, `settings show --section mqtt`, `settings get locators.nelder_mead.enabled`, `settings set away_timeout 300`, `settings unset weighting.algorithm`, `settings locators`, `settings locator nadaraya_watson off`, `settings optimizers`, `settings optimizer absorption off` |
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on`, `calibration compute <rssi> <metres> [--absorption N]` (pure maths: a reading taken at a known distance → the `rssi@1m` config value; RSSI is signed, pass it like coordinates) |
 | `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50`, `history trail <device-id>` (movement summary: room segments per visit, first/last seen, rooms visited), `history heatmap [--device <id>]... [--limit N]` (room usage across all tracked devices: points, visits, dwell seconds, devices per room, most-used first) |
-| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt settings [--key <k>] [--reveal]` (read back every retained global setting, parsed + secrets redacted; exits 1 for an absent `--key`), `mqtt devices [--device <id>]` (read back every retained per-device config on `<prefix>/settings/+/config` — the bulk read-back of `mqtt set-device`; `--device <id>` exits 1 while absent), `mqtt get <topic>` (read back any single topic's retained/live value; exits 1 when nothing there), `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt node-status` (online/offline), `mqtt telemetry [--node <id>]` (node health snapshot: uptime, free memory, RSSI, version) |
+| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt settings [--key <k>] [--reveal]` (read back every retained global setting, parsed + secrets redacted; exits 1 for an absent `--key`), `mqtt devices [--device <id>]` (read back every retained per-device config on `<prefix>/settings/+/config` — the bulk read-back of `mqtt set-device`; `--device <id>` exits 1 while absent), `mqtt get <topic>` (read back any single topic's retained/live value; exits 1 when nothing there), `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt sightings [--device <id>] [--room <id>]` (per-room JSON sighting detail: rssi / exp_rssi, `strongest` + `closest` room per device — the rssi half `distances` drops), `mqtt node-status` (online/offline), `mqtt telemetry [--node <id>]` (node health snapshot: uptime, free memory, RSSI, version) |
 | `config` | `config show`, `config save`, `config doctor --file cfg.yaml`, `config diff [--against draft.yaml] [--file cfg.yaml]` (running-vs-deployed drift, exits 1 on differences) |
 | `repl` | Interactive shell (default with no subcommand) |
 
@@ -272,8 +273,14 @@ been seen, so it can gate a workflow exactly like `rooms locate` does.
 `mqtt distances` and `mqtt node-status` listen on the broker for a bounded
 window (`--duration` seconds) and return aggregated JSON — `distances` marks
 the closest node per device, so "which room is the phone really nearest" is
-`mqtt distances --device <id> --json` and read `nearest[0]`. `mqtt telemetry`
-listens on `<prefix>/rooms/+/telemetry` and aggregates node health per node:
+`mqtt distances --device <id> --json` and read `nearest[0]`. When the
+question is *signal*, not metres (is the kitchen hearing the phone strongly
+or guessing a plausible distance when tuning `rssi@1m`?), use `mqtt
+sightings --device <id> --json`: it parses the JSON sighting topic
+`<prefix>/rooms/<room>/devices/<id>` (rssi, distance, exp_rssi — the fields
+the `/distance` subtopic does not carry) and flags each device's `strongest`
+(best latest rssi) and `closest` (smallest latest distance) room.
+`mqtt telemetry` listens on `<prefix>/rooms/+/telemetry` and aggregates node health per node:
 sample count, worst-case readings over the window (max uptime, min free
 memory, min RSSI) and the most recent full payload, with the lowest-memory
 node flagged in `lowest_free_mem`. Use the raw
