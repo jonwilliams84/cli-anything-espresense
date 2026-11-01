@@ -1981,3 +1981,353 @@ class TestMqttDeviceReadbackWorkflow:
         assert out["found"] is True
         assert out["retained"] is True
         assert out["payload"] == {"name": "watch"}
+
+
+# ── mqtt topics (v0.14.0) ────────────────────────────────────────────────────
+
+INVENTORY_RECORDS = [
+    {"topic": "espresense/settings/expiration/set", "payload": "300", "ts": 1.0, "retain": True},
+    {
+        "topic": "espresense/settings/apple:1005:9-12/config",
+        "payload": '{"name": "Jon Watch", "rssi@1m": -63}',
+        "ts": 1.0,
+        "retain": True,
+    },
+    {"topic": "espresense/rooms/kitchen/status", "payload": "online", "ts": 2.0, "retain": True},
+    {"topic": "espresense/rooms/hall/status", "payload": "offline", "ts": 2.0, "retain": True},
+    {
+        "topic": "espresense/rooms/kitchen/devices/d1",
+        "payload": '{"rssi": -61, "distance": 4.9}',
+        "ts": 3.0,
+        "retain": True,
+    },
+    # in-flight traffic: not stored state, must not be inventoried
+    {
+        "topic": "espresense/settings/expiration/set",
+        "payload": "999",
+        "ts": 9.0,
+        "retain": False,
+    },
+    # secret global setting: redacted by default, revealed on --reveal
+    {
+        "topic": "espresense/settings/mqtt_password/set",
+        "payload": "hunter2",
+        "ts": 4.0,
+        "retain": True,
+    },
+]
+
+
+class TestMqttTopicsE2E:
+    def test_json_snapshot_of_retained_tree(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=INVENTORY_RECORDS) as w:
+            out = json.loads(
+                CliRunner()
+                .invoke(cli, ["--config", str(cfg), "--json", "mqtt", "topics", "--duration", "1"])
+                .output
+            )
+        assert out["prefix"] == "espresense"
+        assert out["filter"] == "espresense/#"
+        assert out["count"] == 6
+        assert out["families"] == {
+            "device_config": 1,
+            "global_setting": 2,
+            "node_status": 2,
+            "device_sighting": 1,
+        }
+        # in-flight traffic and non-retained records never become inventory
+        assert all(t["retain"] is True for t in out["topics"])
+        assert {t["payload"] for t in out["topics"] if t["topic"].endswith("/set")} == {
+            300,
+            "***",
+        }
+        assert w.call_args[1]["topic_filter"] == "espresense/#"
+        assert w.call_args[1]["duration"] == 1
+
+    def test_rows_carry_parsed_payloads_and_sizes(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=INVENTORY_RECORDS):
+            out = json.loads(
+                CliRunner()
+                .invoke(cli, ["--config", str(cfg), "--json", "mqtt", "topics", "--duration", "1"])
+                .output
+            )
+        by_topic = {t["topic"]: t for t in out["topics"]}
+        assert by_topic["espresense/settings/expiration/set"]["payload"] == 300
+        assert by_topic["espresense/rooms/kitchen/status"]["payload"] == "online"
+        assert by_topic["espresense/rooms/kitchen/devices/d1"]["payload"] == {
+            "rssi": -61,
+            "distance": 4.9,
+        }
+        assert by_topic["espresense/rooms/kitchen/status"]["bytes"] == len("online")
+
+    def test_secret_setting_value_redacted_by_default(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=INVENTORY_RECORDS):
+            out = json.loads(
+                CliRunner()
+                .invoke(cli, ["--config", str(cfg), "--json", "mqtt", "topics", "--duration", "1"])
+                .output
+            )
+        by_topic = {t["topic"]: t for t in out["topics"]}
+        assert by_topic["espresense/settings/mqtt_password/set"]["payload"] == "***"
+        assert by_topic["espresense/settings/mqtt_password/set"]["payload_raw"] == "***"
+        # non-setting families keep their payloads
+        assert by_topic["espresense/settings/apple:1005:9-12/config"]["payload"] == {
+            "name": "Jon Watch",
+            "rssi@1m": -63,
+        }
+
+    def test_reveal_optout(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=INVENTORY_RECORDS):
+            out = json.loads(
+                CliRunner()
+                .invoke(
+                    cli,
+                    [
+                        "--config",
+                        str(cfg),
+                        "--json",
+                        "mqtt",
+                        "topics",
+                        "--reveal",
+                        "--duration",
+                        "1",
+                    ],
+                )
+                .output
+            )
+        by_topic = {t["topic"]: t for t in out["topics"]}
+        assert by_topic["espresense/settings/mqtt_password/set"]["payload"] == "hunter2"
+
+    def test_family_filter(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=INVENTORY_RECORDS):
+            out = json.loads(
+                CliRunner()
+                .invoke(
+                    cli,
+                    [
+                        "--config",
+                        str(cfg),
+                        "--json",
+                        "mqtt",
+                        "topics",
+                        "--family",
+                        "node_status",
+                    ],
+                )
+                .output
+            )
+        assert out["count"] == 2
+        assert out["families"] == {"node_status": 2}
+        assert {t["family"] for t in out["topics"]} == {"node_status"}
+
+    def test_custom_prefix_scopes_the_subscription_and_view(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        records = [
+            {"topic": "home2/rooms/kitchen/status", "payload": "online", "ts": 1.0, "retain": True},
+            {
+                "topic": "espresense/rooms/kitchen/status",
+                "payload": "online",
+                "ts": 1.0,
+                "retain": True,
+            },
+        ]
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=records) as w:
+            out = json.loads(
+                CliRunner()
+                .invoke(
+                    cli, ["--config", str(cfg), "--json", "mqtt", "topics", "--prefix", "home2"]
+                )
+                .output
+            )
+        assert w.call_args[1]["topic_filter"] == "home2/#"
+        assert out["prefix"] == "home2"
+        assert out["count"] == 1
+        assert out["topics"][0]["topic"] == "home2/rooms/kitchen/status"
+
+    def test_topic_filter_override(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        records = [
+            {
+                "topic": "espresense/rooms/kitchen/status",
+                "payload": "online",
+                "ts": 1.0,
+                "retain": True,
+            },
+            {
+                "topic": "espresense/rooms/hall/status",
+                "payload": "offline",
+                "ts": 1.0,
+                "retain": True,
+            },
+            # foreign prefix folded into the same collection: dropped by the view
+            {"topic": "home2/settings/gps/set", "payload": "{}", "ts": 2.0, "retain": True},
+        ]
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=records) as w:
+            out = json.loads(
+                CliRunner()
+                .invoke(
+                    cli,
+                    [
+                        "--config",
+                        str(cfg),
+                        "--json",
+                        "mqtt",
+                        "topics",
+                        "--topic",
+                        "espresense/rooms/+/status",
+                    ],
+                )
+                .output
+            )
+        assert w.call_args[1]["topic_filter"] == "espresense/rooms/+/status"
+        assert out["filter"] == "espresense/rooms/+/status"
+        # the view still scopes to the prefix, whatever filter was subscribed
+        assert out["count"] == 2
+        assert out["families"] == {"node_status": 2}
+
+    def test_human_output_is_a_topic_table(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=INVENTORY_RECORDS):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "topics"])
+        assert result.exit_code == 0
+        assert "6 retained topic(s) on espresense/#" in result.output
+        assert "espresense/settings/expiration/set" in result.output
+        assert "global_setting" in result.output
+        # the secret never lands in the human transcript either
+        assert "hunter2" not in result.output
+
+    def test_nothing_retained_is_not_an_error(self, tmp_path):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=[]):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "topics"])
+        assert result.exit_code == 0
+        assert "no retained topics" in result.output
+
+    def test_missing_broker_aborts(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "topics"])
+        assert result.exit_code == 1
+        assert "no MQTT broker configured" in result.output
+
+    def test_help(self):
+        res = CliRunner().invoke(cli, ["mqtt", "topics", "--help"])
+        assert res.exit_code == 0
+        assert "retained" in res.output
+
+
+class TestMqttTopicsWorkflow:
+    """set-node / set-global / set-device → one `mqtt topics` inventory.
+
+    Over the same in-memory broker used by the other read-back workflows:
+    writes from all three families land on distinct topic families, and a
+    single inventory read-back classifies each of them correctly. A
+    `--no-retain` write must never show up — it is not stored state.
+    """
+
+    @pytest.fixture()
+    def broker(self, monkeypatch):
+        store: list[dict] = []
+
+        def fake_publish_setting(
+            host, node_id, key, value, *, prefix="espresense", retain=True, **_
+        ):
+            store.append(
+                {
+                    "topic": f"{prefix}/rooms/{node_id}/{key}/set",
+                    "payload": mqtt_core._stringify(value),
+                    "ts": 1.0,
+                    "retain": retain,
+                }
+            )
+            return {"rc": 0}
+
+        def fake_publish_global(host, key, value, *, prefix="espresense", retain=True, **_):
+            store.append(
+                {
+                    "topic": f"{prefix}/settings/{key}/set",
+                    "payload": mqtt_core._stringify(value),
+                    "ts": 1.0,
+                    "retain": retain,
+                }
+            )
+            return {"rc": 0}
+
+        def fake_publish_device(host, device_id, config, *, prefix="espresense", retain=True, **_):
+            store.append(
+                {
+                    "topic": f"{prefix}/settings/{device_id}/config",
+                    "payload": mqtt_core._stringify(config),
+                    "ts": 1.0,
+                    "retain": retain,
+                }
+            )
+            return {"rc": 0}
+
+        def mqtt_match(topic: str, topic_filter: str) -> bool:
+            t_parts, f_parts = topic.split("/"), topic_filter.split("/")
+            if f_parts and f_parts[-1] == "#":
+                return t_parts[: len(f_parts) - 1] == f_parts[:-1]
+            if len(t_parts) != len(f_parts):
+                return False
+            return all(f in ("+", t_p) for f, t_p in zip(f_parts, t_parts, strict=True))
+
+        def fake_watch(topic_filter, *, duration=None, **_):
+            return [r for r in store if r["retain"] and mqtt_match(r["topic"], topic_filter)]
+
+        monkeypatch.setattr(
+            "cli_anything.espresense.espresense_cli.mqtt_core.publish_setting",
+            fake_publish_setting,
+        )
+        monkeypatch.setattr(
+            "cli_anything.espresense.espresense_cli.mqtt_core.publish_global_setting",
+            fake_publish_global,
+        )
+        monkeypatch.setattr(
+            "cli_anything.espresense.espresense_cli.mqtt_core.publish_device_config",
+            fake_publish_device,
+        )
+        monkeypatch.setattr("cli_anything.espresense.core.mqtt.watch", fake_watch)
+        return store
+
+    def _invoke(self, tmp_path, *args):
+        cfg = tmp_path / "cfg.json"
+        cfg.write_text(json.dumps({"mqtt_host": "broker.local"}))
+        return CliRunner().invoke(cli, ["--config", str(cfg), "--json", *args])
+
+    def test_three_families_inventory_in_one_call(self, tmp_path, broker):
+        self._invoke(tmp_path, "mqtt", "set-node", "kitchen", "absorption", "2.8")
+        self._invoke(tmp_path, "mqtt", "set-global", "expiration", "300")
+        self._invoke(tmp_path, "mqtt", "set-device", "apple:1005:9-12", '{"name": "Watch"}')
+        out = json.loads(self._invoke(tmp_path, "mqtt", "topics").output)
+        assert out["families"] == {
+            "node_setting": 1,
+            "global_setting": 1,
+            "device_config": 1,
+        }
+        by_topic = {t["topic"]: t for t in out["topics"]}
+        assert by_topic["espresense/rooms/kitchen/absorption/set"]["payload"] == 2.8
+        assert by_topic["espresense/settings/expiration/set"]["payload"] == 300
+        assert by_topic["espresense/settings/apple:1005:9-12/config"]["payload"] == {
+            "name": "Watch"
+        }
+
+    def test_no_retain_write_never_becomes_inventory(self, tmp_path, broker):
+        self._invoke(tmp_path, "mqtt", "set-global", "expiration", 300, "--no-retain")
+        out = json.loads(self._invoke(tmp_path, "mqtt", "topics").output)
+        assert out["count"] == 0
+
+    def test_inventory_composes_with_the_dedicated_readbacks(self, tmp_path, broker):
+        self._invoke(tmp_path, "mqtt", "set-global", "expiration", "300")
+        self._invoke(tmp_path, "mqtt", "set-device", "apple:1005:9-12", '{"name": "Watch"}')
+        inventory = json.loads(self._invoke(tmp_path, "mqtt", "topics").output)
+        settings = json.loads(self._invoke(tmp_path, "mqtt", "settings").output)
+        devices = json.loads(self._invoke(tmp_path, "mqtt", "devices").output)
+        assert inventory["families"]["global_setting"] == settings["count"]
+        assert inventory["families"]["device_config"] == devices["count"]
+        assert settings["settings"]["expiration"] == 300
+        assert devices["devices"]["apple:1005:9-12"] == {"name": "Watch"}
