@@ -1970,3 +1970,186 @@ class TestWatchCarriesRetainFlag:
         )
         view = mqtt_core.settings_view(mqtt_core.retained(out))
         assert view == {"expiration": 300}
+
+
+# ── broker inventory (v0.14.0) ────────────────────────────────────────────────
+
+
+def _rec(topic, payload, *, ts=1.0, retain=True):
+    return {"topic": topic, "payload": payload, "ts": ts, "retain": retain}
+
+
+class TestClassifyTopic:
+    def test_global_setting(self):
+        assert mqtt_core.classify_topic("espresense/settings/expiration/set") == "global_setting"
+
+    def test_device_config(self):
+        assert (
+            mqtt_core.classify_topic("espresense/settings/apple:1:9-12/config") == "device_config"
+        )
+
+    def test_node_setting(self):
+        assert mqtt_core.classify_topic("espresense/rooms/kitchen/absorption/set") == "node_setting"
+
+    def test_node_status_lwt(self):
+        assert mqtt_core.classify_topic("espresense/rooms/kitchen/status") == "node_status"
+
+    def test_node_telemetry(self):
+        assert mqtt_core.classify_topic("espresense/rooms/kitchen/telemetry") == "node_telemetry"
+
+    def test_device_sighting(self):
+        assert mqtt_core.classify_topic("espresense/rooms/kitchen/devices/d1") == "device_sighting"
+
+    def test_raw_device_distance(self):
+        assert mqtt_core.classify_topic("espresense/devices/d1/kitchen") == "raw_device_distance"
+
+    def test_companion_location(self):
+        assert mqtt_core.classify_topic("espresense/companion/d1") == "companion_location"
+
+    def test_prefix_length_is_irrelevant(self):
+        assert mqtt_core.classify_topic("home/settings/gps/set") == "global_setting"
+        assert mqtt_core.classify_topic("a/b/rooms/x/devices/d1") == "device_sighting"
+        assert mqtt_core.classify_topic("a/b/c/companion/d1") == "companion_location"
+
+    def test_set_wins_before_bare_suffixes(self):
+        # a write topic is always classified as a write, never as the bare
+        # reading topic its key was named after
+        assert mqtt_core.classify_topic("espresense/settings/telemetry/set") == "global_setting"
+
+    def test_unknown_suffixes_are_other(self):
+        assert mqtt_core.classify_topic("espresense/rooms/x/nothing") == "other"
+        assert mqtt_core.classify_topic("espresense/rooms/x/whatever/set") == "node_setting"
+        assert mqtt_core.classify_topic("some/other/thing") == "other"
+
+    def test_empty_and_none_are_other(self):
+        assert mqtt_core.classify_topic("") == "other"
+        assert mqtt_core.classify_topic(None) == "other"
+
+
+class TestTopicsView:
+    def test_folds_retained_records_into_rows(self):
+        out = mqtt_core.topics_view(
+            [
+                _rec("espresense/settings/expiration/set", "300", ts=1.0),
+                _rec("espresense/rooms/kitchen/status", "online", ts=2.0),
+            ]
+        )
+        assert out["count"] == 2
+        assert out["families"] == {"global_setting": 1, "node_status": 1}
+        by_topic = {t["topic"]: t for t in out["topics"]}
+        assert by_topic["espresense/settings/expiration/set"] == {
+            "topic": "espresense/settings/expiration/set",
+            "family": "global_setting",
+            "retain": True,
+            "bytes": 3,
+            "payload_raw": "300",
+            "payload": 300,
+        }
+        assert by_topic["espresense/rooms/kitchen/status"]["family"] == "node_status"
+
+    def test_live_records_are_not_stored_state(self):
+        out = mqtt_core.topics_view(
+            [
+                _rec("espresense/settings/expiration/set", "1", retain=False),
+                _rec("espresense/rooms/kitchen/status", "online", retain=True),
+            ]
+        )
+        assert out["count"] == 1
+        assert [t["topic"] for t in out["topics"]] == ["espresense/rooms/kitchen/status"]
+
+    def test_retained_beats_a_newer_live_message_on_the_same_topic(self):
+        # a publisher rewriting a value during the window must not hide the
+        # stored one; latest_by_topic picks the retained record first
+        out = mqtt_core.topics_view(
+            [
+                _rec("espresense/settings/expiration/set", "300", ts=1.0),
+                _rec("espresense/settings/expiration/set", "999", ts=2.0, retain=False),
+            ]
+        )
+        assert out["count"] == 1
+        assert out["topics"][0]["payload"] == 300
+
+    def test_rewrites_keep_the_latest_retained_value(self):
+        out = mqtt_core.topics_view(
+            [
+                _rec("espresense/settings/expiration/set", "100", ts=1.0),
+                _rec("espresense/settings/expiration/set", "200", ts=2.0),
+            ]
+        )
+        assert out["topics"][0]["payload"] == 200
+        assert out["count"] == 1
+
+    def test_json_payloads_arrive_parsed(self):
+        out = mqtt_core.topics_view([_rec("espresense/settings/gps/set", '{"lat":1.0}')])
+        assert out["topics"][0]["payload"] == {"lat": 1.0}
+        assert out["topics"][0]["bytes"] == len('{"lat":1.0}')
+
+    def test_broken_json_never_raises(self):
+        out = mqtt_core.topics_view([_rec("espresense/rooms/x/status", "{broken")])
+        assert out["topics"][0]["payload"] == "{broken"
+        assert out["topics"][0]["family"] == "node_status"
+
+    def test_foreign_prefix_dropped_with_prefix(self):
+        out = mqtt_core.topics_view(
+            [
+                _rec("espresense/rooms/kitchen/status", "online"),
+                _rec("home2/rooms/kitchen/status", "online"),
+                _rec("nope/rooms/kitchen/status", "online"),
+            ],
+            prefix="espresense",
+        )
+        assert out["count"] == 1
+        assert out["topics"][0]["topic"] == "espresense/rooms/kitchen/status"
+
+    def test_no_prefix_keeps_everything(self):
+        out = mqtt_core.topics_view(
+            [
+                _rec("espresense/rooms/x/status", "a"),
+                _rec("home2/rooms/x/status", "b"),
+            ]
+        )
+        assert out["count"] == 2
+
+    def test_topics_sorted_and_families_counted(self):
+        out = mqtt_core.topics_view(
+            [
+                _rec("espresense/rooms/b/status", "x", ts=3.0),
+                _rec("espresense/rooms/a/status", "x", ts=1.0),
+                _rec("espresense/settings/expiration/set", "1", ts=2.0),
+            ]
+        )
+        assert [t["topic"] for t in out["topics"]] == [
+            "espresense/rooms/a/status",
+            "espresense/rooms/b/status",
+            "espresense/settings/expiration/set",
+        ]
+        assert out["families"] == {"node_status": 2, "global_setting": 1}
+
+    def test_malformed_records_are_skipped(self):
+        out = mqtt_core.topics_view(
+            [None, "nope", {"topic": "espresense/rooms/x/status", "retain": True}, {}]
+        )
+        assert out["count"] == 1
+        assert out["topics"][0]["family"] == "node_status"
+
+    def test_empty_input(self):
+        out = mqtt_core.topics_view([])
+        assert out == {"count": 0, "families": {}, "topics": []}
+
+    def test_agrees_with_the_family_views(self):
+        """The inventory must tell the same story as the dedicated read-backs."""
+        records = [
+            _rec("espresense/settings/expiration/set", "300"),
+            _rec("espresense/settings/apple:1/config", '{"name":"Watch"}'),
+            _rec("espresense/rooms/kitchen/status", "online"),
+        ]
+        out = mqtt_core.topics_view(mqtt_core.retained(records))
+        by_topic = {t["topic"]: t["payload"] for t in out["topics"]}
+        assert (
+            by_topic["espresense/settings/expiration/set"]
+            == mqtt_core.settings_view(mqtt_core.retained(records))["expiration"]
+        )
+        assert (
+            by_topic["espresense/settings/apple:1/config"]
+            == mqtt_core.device_configs_view(mqtt_core.retained(records))["apple:1"]
+        )

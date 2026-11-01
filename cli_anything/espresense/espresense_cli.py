@@ -2701,6 +2701,105 @@ def mqtt_get(ctx, topic, duration):
         )
 
 
+@mqtt.command("topics")
+@click.option(
+    "--topic",
+    "topic_filter",
+    default=None,
+    help="Override the subscription filter (default: <prefix>/#)",
+)
+@click.option(
+    "--family",
+    default=None,
+    help="Only this topic family (e.g. global_setting, device_config, node_status)",
+)
+@click.option("--reveal", is_flag=True, help="Do not redact secret setting values")
+@click.option(
+    "--duration",
+    default=2.0,
+    type=float,
+    help="Seconds to collect retained messages (default: 2)",
+)
+@click.option("--prefix", default=None, help="Topic prefix (default: espresense)")
+@click.pass_context
+def mqtt_topics(ctx, topic_filter, family, reveal, duration, prefix):
+    """Inventory every retained topic under a MQTT prefix.
+
+    The bulk read-back of the whole broker tree: subscribes to
+    `<prefix>/#` for --duration seconds and reports every retained topic the
+    broker holds — one row per topic with its topic family, payload size and
+    parsed payload (JSON where it parses, raw string otherwise). This is the
+    one-call answer to "what does this deployment actually have stored?" —
+    `mqtt settings`, `mqtt devices` and `mqtt get` each verify one slice of
+    that state (the settings families, or a single topic); this verifies
+    the lot, including the topics that only the deployment itself knows
+    about (node status LWTs, telemetry, per-room device sightings,
+    companion-computed distances), reachable until now only by scraping the
+    `mqtt watch` firehose.
+
+    Retained state is what a restart re-applies, so only retained messages
+    are inventoried — in-flight traffic on the same topics is not stored
+    state. Secret setting values are redacted by default; `--reveal` opts
+    out, matching `mqtt settings`.
+
+    Example:
+      mqtt topics
+      mqtt topics --family device_config
+      mqtt topics --prefix home2 --topic 'home2/rooms/+/status'
+    """
+    p = prefix or ctx.obj.get("mqtt_topic_prefix", "espresense")
+    filt = (topic_filter or "").strip() or f"{p}/#"
+    kw = _mqtt_args(ctx)
+    try:
+        records = mqtt_core.watch(topic_filter=filt, duration=duration, **kw)
+    except mqtt_core.MqttError as exc:
+        _abort(str(exc))
+        return
+    view = mqtt_core.topics_view(mqtt_core.retained(records), prefix=p)
+    rows = view["topics"]
+    if not reveal:
+        rows = [
+            _redacted_topic_row(row, settings_core)
+            if row["family"] in ("global_setting", "node_setting")
+            and settings_core.is_secret(str(row["topic"]).split("/")[-2])
+            else row
+            for row in rows
+        ]
+    if family:
+        rows = [row for row in rows if row["family"] == family]
+    families: dict = {}
+    for row in rows:
+        families[row["family"]] = families.get(row["family"], 0) + 1
+    out = {
+        "prefix": p,
+        "filter": filt,
+        "count": len(rows),
+        "families": families,
+        "topics": rows,
+    }
+    if ctx.obj.get("as_json"):
+        emit(ctx, out)
+        return
+    if not rows:
+        click.echo(
+            f"no retained topics on {filt} — the deployment may be publishing "
+            "non-retained only, or the prefix may differ (--prefix)"
+        )
+        return
+    click.echo(f"{len(rows)} retained topic(s) on {filt}")
+    click.echo(f"{'topic':<52} {'family':<20} {'bytes':>6}")
+    for row in rows:
+        click.echo(f"{row['topic']:<52} {row['family']:<20} {row['bytes']:>6}")
+
+
+def _redacted_topic_row(row: dict, settings_module) -> dict:
+    return {
+        **row,
+        "payload_raw": settings_module.REDACTED,
+        "payload": settings_module.REDACTED,
+    }
+
+
 # ──────────────────────────────────────────────────────── REPL
 
 

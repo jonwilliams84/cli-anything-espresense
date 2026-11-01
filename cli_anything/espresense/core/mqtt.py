@@ -353,6 +353,112 @@ def settings_view(records: list[dict]) -> dict:
     return view
 
 
+def classify_topic(topic: str) -> str:
+    """Classify an ESPresense topic into its family, by suffix shape.
+
+    The family is matched *relatively* (against the trailing segments), so
+    the answer is the same under any topic prefix — the harness only ever
+    assumes `espresense` for constructing, never for reading. Rule order
+    matters and is deliberate: the writing shapes (`/set`, `/config`) are
+    checked before the bare status/telemetry suffixes, so a node setting
+    whose key were literally `status` can never be mistaken for the
+    status LWT. Unrecognised topics come back `other`, not an error — an
+    inventory must report what it finds, including what it does not know.
+
+    Families:
+      global_setting       `<...>/settings/<key>/set`        (mqtt set-global)
+      device_config        `<...>/settings/<id>/config`      (mqtt set-device)
+      node_setting         `<...>/rooms/<node>/<key>/set`    (mqtt set-node)
+      node_status          `<...>/rooms/<node>/status`       (online LWT)
+      node_telemetry       `<...>/rooms/<node>/telemetry`
+      device_sighting      `<...>/rooms/<room>/devices/<id>` (rssi/distance JSON)
+      raw_device_distance  `<...>/devices/<device>/<node>`
+      companion_location   `<...>/companion/<device>`
+    """
+    parts = str(topic or "").split("/")
+    last = parts[-1] if parts else ""
+
+    def _mark(marker: str) -> Optional[int]:
+        """Rightmost segment index equal to `marker`, else None."""
+        for i in range(len(parts) - 1, -1, -1):
+            if parts[i] == marker:
+                return i
+        return None
+
+    # depth = how many segments follow the marker (1 → marker is parent)
+    s = _mark("settings")
+    if s is not None and last == "set" and len(parts) - 1 - s == 2:
+        return "global_setting"
+    if s is not None and last == "config" and len(parts) - 1 - s == 2:
+        return "device_config"
+    r = _mark("rooms")
+    if r is not None:
+        depth = len(parts) - 1 - r
+        if last == "set" and depth == 3:
+            return "node_setting"
+        if depth == 2 and last == "status":
+            return "node_status"
+        if depth == 2 and last == "telemetry":
+            return "node_telemetry"
+        if depth == 3 and r + 2 < len(parts) - 1 and parts[r + 2] == "devices":
+            return "device_sighting"
+    d = _mark("devices")
+    if d is not None and d >= 0 and len(parts) - 1 - d == 2:
+        return "raw_device_distance"
+    c = _mark("companion")
+    if c is not None and len(parts) - 1 - c == 1:
+        return "companion_location"
+    return "other"
+
+    return "other"
+
+
+def topics_view(records: list[dict], *, prefix: Optional[str] = None) -> dict:
+    """Fold `watch()` records into an inventory of the broker's retained topics.
+
+    Input is `watch()` records (ideally passed through `retained()` first —
+    the caller decides, exactly like `settings_view` / `device_configs_view`).
+    One row per topic: the value `latest_by_topic` picked (a retained read-beat
+    over in-flight traffic), its family (`classify_topic`), the raw payload, the
+    parsed payload (`parse_payload` — JSON where it parses, never raises) and
+    `bytes` (the payload size, as a size-of-state number).
+
+    With `prefix`, topics that are not under it are dropped — when the
+    subscription was overridden with `--topic`, a foreign-prefix record folded
+    into the same collection can never pollute the inventory.
+
+    Returns `{"count": N, "families": {family: n}, "topics": [...]}` with
+    topics sorted lexicographically, so the output is identical for two runs
+    over the same broker state.
+    """
+    latest = latest_by_topic(records)
+    rows: list[dict] = []
+    for topic, rec in latest.items():
+        if not bool(rec.get("retain")):
+            continue
+        if prefix is not None:
+            t = str(topic)
+            if t != prefix and not t.startswith(f"{prefix}/"):
+                continue
+        payload_raw = rec.get("payload", "")
+        raw_str = payload_raw if isinstance(payload_raw, str) else str(payload_raw)
+        rows.append(
+            {
+                "topic": topic,
+                "family": classify_topic(topic),
+                "retain": True,
+                "bytes": len(raw_str),
+                "payload_raw": raw_str,
+                "payload": parse_payload(raw_str),
+            }
+        )
+    rows.sort(key=lambda r: r["topic"])
+    families: dict = {}
+    for r in rows:
+        families[r["family"]] = families.get(r["family"], 0) + 1
+    return {"count": len(rows), "families": families, "topics": rows}
+
+
 def device_configs_view(records: list[dict]) -> dict:
     """Fold per-device config records into {device_id: parsed payload}.
 

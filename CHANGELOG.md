@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.14.0] — 2026-11-01
+
+- The retained read-back family is complete. v0.11.0 read back the global
+  settings table, v0.12.0 the per-device config fingerprints, and `mqtt get`
+  reads any single topic — but a deployment retains MORE than those two
+  families: node online/offline LWTs, telemetry, per-room device sightings,
+  companion-computed distances. Until v0.14.0 those were reachable only by
+  scraping the `mqtt watch` firehose, and there was no one-call answer to
+  "what does this deployment actually have stored on the broker?" One
+  command closes that:
+  - **`mqtt topics`** — subscribes to `<prefix>/#` for `--duration` seconds
+    and inventories every retained topic: one row per topic with its
+    **topic family** (classified by suffix shape, prefix-agnostic:
+    `global_setting`, `device_config`, `node_setting`, `node_status`,
+    `node_telemetry`, `device_sighting`, `raw_device_distance`,
+    `companion_location`, `other` — a family only the deployment itself
+    knows about still appears, as `other`, so the inventory never silently
+    hides state), **payload size** (`bytes` — a size-of-state number you
+    can diff between brokers), and the **parsed payload** (JSON where it
+    parses, raw string otherwise, never raises). Retained state only —
+    in-flight traffic on the same topics is not stored state and is never
+    inventoried, exactly like `mqtt settings` / `mqtt devices`. Secret
+    setting values are redacted by default (`--reveal` opts out, matching
+    `mqtt settings`); `--family` narrows to one family; `--topic` overrides
+    the subscription filter (the view still scopes to the prefix, so a
+    foreign-prefix record can never pollute the inventory). Nothing
+    retained is a human hint + exit 0, following `mqtt devices`.
+  - Under the hood: two pure helpers in `core/mqtt.py`. `classify_topic`
+    matches the family by *marker segments* (`settings`, `rooms`,
+    `devices`, `companion`) searched from the right, so any topic prefix
+    classifies identically — the harness only ever assumes a topic prefix
+    for constructing, never for reading; the writing shapes
+    (`/set`, `/config`) are decided first, so a bare status/telemetry
+    suffix can never shadow a write. `topics_view(records, prefix=...)`
+    folds `retained()` + `latest_by_topic` semantics into sorted
+    `{count, families, topics}` rows and tells the same story as the
+    dedicated read-backs: for any record collection, `topics_view`'s rows
+    for the settings families equal `settings_view`/`device_configs_view`
+    (pinned by a pairing test).
+  - Unit-tested in `test_core.py` (`TestClassifyTopic`,
+    `TestTopicsView` incl. agreement with the family views); CLI behaviour
+    pinned in `test_full_e2e.py` (`TestMqttTopicsE2E`: JSON snapshot,
+    parsed payloads + sizes, secret redaction / `--reveal`, `--family` and
+    `--topic` filters, `--prefix` scoping, human table, nothing-retained,
+    missing-broker abort, `--help`; `TestMqttTopicsWorkflow`:
+    `set-node` + `set-global` + `set-device` all verified in one inventory
+    call over an in-memory broker, `--no-retain` write never inventoried,
+    inventory agrees with the dedicated read-backs).
+- Docs updated: both READMEs, both SKILL.md copies (kept byte-identical),
+  TEST.md, CLAUDE.md.
+
 ## [0.13.0] — 2026-10-25
 
 - The MQTT presence family gains its signal half: **`mqtt sightings`**.
