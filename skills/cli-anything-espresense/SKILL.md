@@ -281,14 +281,14 @@ the closest node per device, so "which room is the phone really nearest" is
 question is *signal*, not metres (is the kitchen hearing the phone strongly
 or guessing a plausible distance when tuning `rssi@1m`?), use `mqtt
 sightings --device <id> --json`: it parses the JSON sighting topic
-`<prefix>/rooms/<room>/devices/<id>` (rssi, distance, exp_rssi — the fields
-the `/distance` subtopic does not carry) and flags each device's `strongest`
+`<prefix>/devices/<id>/<room>` (rssi, distance, exp_rssi — the fields a
+bare distance does not carry) and flags each device's `strongest`
 (best latest rssi) and `closest` (smallest latest distance) room.
 `mqtt telemetry` listens on `<prefix>/rooms/+/telemetry` and aggregates node health per node:
 sample count, worst-case readings over the window (max uptime, min free
 memory, min RSSI) and the most recent full payload, with the lowest-memory
 node flagged in `lowest_free_mem`. Use the raw
-`mqtt watch 'espresense/rooms/+/devices/+'` only when you need every individual
+`mqtt watch 'espresense/devices/+/+'` only when you need every individual
 message; the snapshots are their aggregated views.
 
 **`history heatmap` is the fleet-level `history trail`.** It fetches every

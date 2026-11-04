@@ -226,7 +226,7 @@ class TestMqttDistancesE2E:
             )
         assert result.exit_code == 0
         out = json.loads(result.output)
-        assert out["topic_filter"] == "espresense/rooms/+/devices/+"
+        assert out["topic_filter"] == "espresense/devices/+/+"
         assert out["duration"] == 3
         assert out["messages"] == 4
         assert out["devices"]["d1"]["hall"]["distance"] == 4.5
@@ -255,7 +255,7 @@ class TestMqttDistancesE2E:
             )
         assert result.exit_code == 0
         out = json.loads(result.output)
-        assert out["topic_filter"] == "home/rooms/+/devices/+"
+        assert out["topic_filter"] == "home/devices/d1/kitchen"
 
     def test_human_output_renders_distance_table(self, tmp_path, monkeypatch):
         cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
@@ -411,7 +411,7 @@ class TestPresenceWorkflow:
                     "--json",
                     "mqtt",
                     "watch",
-                    "espresense/rooms/+/devices/+",
+                    "espresense/devices/+/+",
                     "--duration",
                     "1",
                 ],
@@ -488,7 +488,7 @@ class TestMqttSightingsE2E:
             )
         assert result.exit_code == 0
         out = json.loads(result.output)
-        assert out["topic_filter"] == "espresense/rooms/+/devices/+"
+        assert out["topic_filter"] == "espresense/devices/+/+"
         assert out["duration"] == 3
         assert out["messages"] == 3  # the bare-number /distance payload is not a sighting
         kitchen = out["devices"]["d1"]["kitchen"]
@@ -523,7 +523,7 @@ class TestMqttSightingsE2E:
             )
         assert result.exit_code == 0
         out = json.loads(result.output)
-        assert out["topic_filter"] == "home/rooms/+/devices/+"
+        assert out["topic_filter"] == "home/devices/d1/kitchen"
         assert out["devices"] == {}
 
     def test_human_output_renders_the_signal_table(self, tmp_path, monkeypatch):

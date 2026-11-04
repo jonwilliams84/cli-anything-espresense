@@ -2369,7 +2369,7 @@ def mqtt_watch(ctx, topic_filter, duration):
 def mqtt_distances(ctx, device_id, node_id, duration, prefix):
     """Snapshot which nodes see which devices, at what distance.
 
-    Subscribes to <prefix>/rooms/+/devices/+ for --duration seconds and
+    Subscribes to <prefix>/devices/<id>/<room> for --duration seconds and
     aggregates the raw distance messages: per device and node, the most
     recent distance plus min/max/sample count over the window, with the
     closest node flagged. `mqtt watch` gives you the firehose; this gives
@@ -2399,13 +2399,11 @@ def mqtt_distances(ctx, device_id, node_id, duration, prefix):
 @click.option("--prefix", default=None, help="Topic prefix (default: espresense)")
 @click.pass_context
 def mqtt_sightings(ctx, device_id, room_id, duration, prefix):
-    """Per-device sighting detail from <prefix>/rooms/+/devices/+.
+    """Per-device sighting detail from <prefix>/devices/<id>/<room>.
 
-    Next to the bare-number distance on
-    <prefix>/rooms/<room>/devices/<id>/distance, ESPresense publishes a JSON
-    sighting — rssi, distance, expected rssi — on
-    <prefix>/rooms/<room>/devices/<id>. That rssi/exp_rssi half is what
-    `mqtt distances` cannot show: whether a room actually hears a device
+    ESPresense publishes a JSON sighting — rssi, distance, expected rssi —
+    on <prefix>/devices/<id>/<room>. The rssi/exp_rssi half is what
+    `mqtt distances` does not show: whether a room actually hears a device
     strongly or just reports a plausible distance — the evidence you need
     when tuning a room's rssi@1m calibration. Same topic filter as
     `mqtt distances`; this gives the signal table.

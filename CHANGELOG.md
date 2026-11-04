@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.14.1] — 2026-11-04
+
+- **Fix: `mqtt distances` and `mqtt sightings` saw nothing on real nodes.**
+  Both listened on `<prefix>/rooms/+/devices/+`, but ESPresense firmware
+  publishes sightings to `<prefix>/devices/<id>/<room>`, so against a live
+  v4.0.8 deployment both returned 0 messages. They now subscribe to
+  `<prefix>/devices/+/+`, narrowed to `<prefix>/devices/<id>/<room>` when
+  `--device`/`--node`/`--room` is given, and the topic parser still accepts
+  the old shape. Regression tests use a real captured tile payload.
+
 ## [0.14.0] — 2026-11-01
 
 - The retained read-back family is complete. v0.11.0 read back the global
