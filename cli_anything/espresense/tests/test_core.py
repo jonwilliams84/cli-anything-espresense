@@ -768,14 +768,14 @@ class TestDistanceSnapshot:
             out = telemetry_core.distance_snapshot("broker.local", duration=2.5)
         mock_watch.assert_called_once_with(
             "broker.local",
-            "espresense/rooms/+/devices/+",
+            "espresense/devices/+/+",
             port=1883,
             username=None,
             password=None,
             duration=2.5,
         )
         assert out["devices"]["d1"]["kitchen"]["distance"] == 3.0
-        assert out["topic_filter"] == "espresense/rooms/+/devices/+"
+        assert out["topic_filter"] == "espresense/devices/+/+"
         assert out["duration"] == 2.5
         assert out["nearest"]["d1"][0]["node"] == "kitchen"
 
@@ -784,7 +784,7 @@ class TestDistanceSnapshot:
             telemetry_core.distance_snapshot(
                 "broker.local", device_id="d1", node_id="kitchen", prefix="home"
             )
-        assert mock_watch.call_args[0][1] == "home/rooms/+/devices/+"
+        assert mock_watch.call_args[0][1] == "home/devices/d1/kitchen"
 
 
 class TestAggregateStatus:
@@ -1387,13 +1387,13 @@ class TestSightingsSnapshot:
             out = telemetry_core.sightings_snapshot("broker.local", duration=2.0)
         mock_watch.assert_called_once_with(
             "broker.local",
-            "espresense/rooms/+/devices/+",
+            "espresense/devices/+/+",
             port=1883,
             username=None,
             password=None,
             duration=2.0,
         )
-        assert out["topic_filter"] == "espresense/rooms/+/devices/+"
+        assert out["topic_filter"] == "espresense/devices/+/+"
         assert out["duration"] == 2.0
         assert out["prefix"] == "espresense"
 
@@ -1402,7 +1402,7 @@ class TestSightingsSnapshot:
             telemetry_core.sightings_snapshot(
                 "broker.local", device_id="d1", room="kitchen", prefix="home"
             )
-        assert mock_watch.call_args[0][1] == "home/rooms/+/devices/+"
+        assert mock_watch.call_args[0][1] == "home/devices/d1/kitchen"
 
 
 class TestHistoryHeatmap:
@@ -2153,3 +2153,66 @@ class TestTopicsView:
             by_topic["espresense/settings/apple:1/config"]
             == mqtt_core.device_configs_view(mqtt_core.retained(records))["apple:1"]
         )
+
+
+class TestFirmwareDeviceTopic:
+    """Live ESPresense v4 nodes publish sightings to <prefix>/devices/<id>/<room>.
+
+    Regression: distances/sightings listened only on <prefix>/rooms/+/devices/+,
+    a shape the firmware never publishes, so both returned 0 messages.
+    """
+
+    PAYLOAD = (
+        '{"mac":"d5a89ae7ad29","id":"tile:d5a89ae7ad29","rssi@1m":-71,'
+        '"rssi":-47.50,"rxAdj":-13,"rssiVar":10.89,"distance":0.01,'
+        '"var":0.00,"close":true,"int":6467}'
+    )
+
+    def _rec(self, room, payload=None):
+        return {
+            "topic": f"espresense/devices/tile:d5a89ae7ad29/{room}",
+            "payload": payload or self.PAYLOAD,
+            "ts": 1,
+        }
+
+    def test_firmware_topic_parses_room_and_device(self):
+        assert telemetry_core._parse_device_topic(
+            "espresense/devices/tile:d5a89ae7ad29/dining_room", "espresense"
+        ) == ("dining_room", "tile:d5a89ae7ad29")
+
+    def test_legacy_topic_still_parses(self):
+        assert telemetry_core._parse_device_topic(
+            "espresense/rooms/kitchen/devices/d1", "espresense"
+        ) == ("kitchen", "d1")
+
+    def test_other_shapes_are_rejected(self):
+        for topic in (
+            "espresense/devices/d1",
+            "espresense/devices/d1/kitchen/extra",
+            "espresense/devices//kitchen",
+            "espresense/rooms/kitchen/telemetry",
+            "other/devices/d1/kitchen",
+        ):
+            assert telemetry_core._parse_device_topic(topic, "espresense") is None, topic
+
+    def test_filter_defaults_and_narrows(self):
+        f = telemetry_core.device_topic_filter
+        assert f("espresense") == "espresense/devices/+/+"
+        assert f("espresense", "tile:abc") == "espresense/devices/tile:abc/+"
+        assert f("espresense", room="kitchen") == "espresense/devices/+/kitchen"
+
+    def test_sightings_from_firmware_records(self):
+        weaker = self.PAYLOAD.replace('"rssi":-47.50', '"rssi":-60.00').replace(
+            '"distance":0.01', '"distance":0.09'
+        )
+        out = telemetry_core.aggregate_sightings(
+            [self._rec("dining_room"), self._rec("kitchen", weaker)]
+        )
+        assert out["messages"] == 2
+        assert out["devices"]["tile:d5a89ae7ad29"]["dining_room"]["latest"]["rssi"] == -47.5
+        assert out["strongest"]["tile:d5a89ae7ad29"] == "dining_room"
+        assert out["closest"]["tile:d5a89ae7ad29"] == "dining_room"
+
+    def test_distances_from_firmware_records(self):
+        snap = telemetry_core.aggregate_distances([self._rec("dining_room")])
+        assert snap["devices"]["tile:d5a89ae7ad29"]["dining_room"]["distance"] == 0.01

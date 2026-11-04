@@ -150,7 +150,8 @@ cli-anything-espresense history heatmap
 cli-anything-espresense history heatmap --device apple:1005:9-12 --limit 500
 ```
 
-`mqtt distances` subscribes to `<prefix>/rooms/+/devices/+` for the window and
+`mqtt distances` subscribes to `<prefix>/devices/+/+` (the firmware's
+`<prefix>/devices/<id>/<room>` sightings, narrowed by `--device`/`--node`) for the window and
 aggregates: per device and node, the most recent distance plus min/max/sample
 count, with the closest node flagged. `mqtt telemetry` subscribes to
 `<prefix>/rooms/+/telemetry` and aggregates node health per node: sample
@@ -158,9 +159,9 @@ count, worst-case readings over the window (max uptime, min free memory, min
 RSSI) and the most recent full payload, with the lowest-memory node flagged in
 `lowest_free_mem`. Both are the readable counterparts to `mqtt
 watch`, which stays available for the raw feed. `mqtt sightings` listens on
-the same `<prefix>/rooms/+/devices/+` filter as `mqtt distances`, but instead
-of the bare-number distance payloads it parses the JSON sighting topic
-(`<prefix>/rooms/<room>/devices/<id>`): per device and room, sample count,
+the same `<prefix>/devices/+/+` topics as `mqtt distances`, but instead
+of distances alone it keeps the full JSON sighting
+(`<prefix>/devices/<id>/<room>`): per device and room, sample count,
 min/max rssi, the latest full payload (rssi, distance, exp_rssi) and — per
 device — the `strongest` room (best latest rssi) and the `closest` room
 (smallest latest distance), so you can see whether a room actually *hears* a

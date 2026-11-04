@@ -7,13 +7,13 @@ those questions into structured answers:
 
 - `whereis`          — last known position of one device (companion history)
 - `distance_snapshot` — which nodes see which devices, at what distance
-                        (`<prefix>/rooms/+/devices/+` over MQTT)
+                        (`<prefix>/devices/+/+` over MQTT)
 - `status_snapshot`   — which nodes report online/offline
                         (`<prefix>/rooms/<node>/status`, retained by nodes)
 - `telemetry_snapshot` — node health: uptime, free memory, wifi RSSI, firmware
                         version, IP (`<prefix>/rooms/<node>/telemetry`)
 - `sightings_snapshot` — per-room device sighting detail: rssi, distance,
-                        expected rssi (`<prefix>/rooms/+/devices/+` JSON topic)
+                        expected rssi (`<prefix>/devices/+/+` JSON topic)
 - `occupancy`         — which tracked devices are currently in which room
 
 Everything that touches the broker goes through `mqtt.watch`; everything else
@@ -71,15 +71,43 @@ def _strip_prefix(topic: str, prefix: str) -> Optional[str]:
     return None
 
 
-def _parse_distance_topic(topic: str, prefix: str) -> Optional[tuple[str, str]]:
-    """Split `<prefix>/rooms/<node>/devices/<device>` into (node, device)."""
+def _parse_device_topic(topic: str, prefix: str) -> Optional[tuple[str, str]]:
+    """Split a per-room device sighting topic into (room, device).
+
+    ESPresense firmware publishes `<prefix>/devices/<device>/<room>` (the
+    shape live v4 nodes use); the older `<prefix>/rooms/<room>/devices/<device>`
+    shape is still accepted. Anything else — a `/distance` subtopic, telemetry,
+    status — returns None, so it can never become a sighting.
+    """
     rest = _strip_prefix(topic or "", prefix)
     if rest is None:
         return None
     parts = rest.split("/")
-    if len(parts) == 4 and parts[0] == "rooms" and parts[2] == "devices":
-        return parts[1], parts[3]
-    return None
+    if len(parts) == 3 and parts[0] == "devices":
+        dev, room = parts[1], parts[2]
+    elif len(parts) == 4 and parts[0] == "rooms" and parts[2] == "devices":
+        room, dev = parts[1], parts[3]
+    else:
+        return None
+    if not room or not dev:
+        return None
+    return room, dev
+
+
+def device_topic_filter(
+    prefix: str, device_id: Optional[str] = None, room: Optional[str] = None
+) -> str:
+    """MQTT filter for the firmware's `<prefix>/devices/<device>/<room>` topics.
+
+    Narrowed to one device and/or room when given, so the broker does the
+    filtering instead of the client.
+    """
+    return f"{prefix}/devices/{device_id or '+'}/{room or '+'}"
+
+
+def _parse_distance_topic(topic: str, prefix: str) -> Optional[tuple[str, str]]:
+    """(node, device) for a sighting topic; see `_parse_device_topic`."""
+    return _parse_device_topic(topic, prefix)
 
 
 def _parse_status_topic(topic: str, prefix: str) -> Optional[str]:
@@ -185,12 +213,12 @@ def distance_snapshot(
     username: Optional[str] = None,
     password: Optional[str] = None,
 ) -> dict:
-    """Subscribe to `<prefix>/rooms/+/devices/+` for `duration` seconds.
+    """Subscribe to `<prefix>/devices/<device>/<room>` for `duration` seconds.
 
     Returns the aggregated per-device/per-node table plus a `nearest` ranking.
     This is the readable counterpart to the raw `mqtt watch` firehose.
     """
-    topic_filter = f"{prefix}/rooms/+/devices/+"
+    topic_filter = device_topic_filter(prefix, device_id, node_id)
     records = mqtt_core.watch(
         host,
         topic_filter,
@@ -422,10 +450,10 @@ def telemetry_snapshot(
 
 # ── device sightings ─────────────────────────────────────────────────────────
 
-# Next to the bare-number `.../devices/<id>/distance` topic ESPresense
-# publishes a full JSON sighting per room per device on
-# `<prefix>/rooms/<room>/devices/<id>`: rssi, distance, expected rssi — the
-# fields the distance topic does not carry, and the evidence an operator
+# ESPresense publishes a full JSON sighting per room per device on
+# `<prefix>/devices/<id>/<room>` (`mqtt topics` lists these as
+# `raw_device_distance`): rssi, distance, expected rssi — the fields a bare
+# distance does not carry, and the evidence an operator
 # needs when tuning a room's rssi@1m calibration. Spelling has drifted
 # across firmware versions (`expRssi` vs `exp_rssi`), so known keys are
 # normalised the same way `_TELEMETRY_ALIASES` does it, and unknown keys
@@ -474,21 +502,8 @@ def parse_sighting_payload(payload: str) -> Optional[dict]:
 
 
 def _parse_sighting_topic(topic: str, prefix: str) -> Optional[tuple[str, str]]:
-    """Extract (room, device_id) from `<prefix>/rooms/<room>/devices/<id>`.
-
-    Only the exact bare shape counts: the `/distance` and `/distance_raw`
-    subtopics, a telemetry or status topic folded into the same collection
-    can never become a sighting.
-    """
-    rest = _strip_prefix(topic or "", prefix)
-    if rest is None:
-        return None
-    parts = rest.split("/")
-    if len(parts) != 4 or parts[0] != "rooms" or parts[2] != "devices":
-        return None
-    if not parts[1] or not parts[3]:
-        return None
-    return parts[1], parts[3]
+    """(room, device_id) for a sighting topic; see `_parse_device_topic`."""
+    return _parse_device_topic(topic, prefix)
 
 
 def aggregate_sightings(
@@ -617,15 +632,14 @@ def sightings_snapshot(
     username: Optional[str] = None,
     password: Optional[str] = None,
 ) -> dict:
-    """Subscribe to `<prefix>/rooms/+/devices/+` for `duration` seconds.
+    """Subscribe to `<prefix>/devices/<device>/<room>` for `duration` seconds.
 
-    The same filter `distance_snapshot` listens on — the JSON sighting topic
-    sits right next to the bare-number distance topic — but this returns the
+    The same topics `distance_snapshot` listens on, but this returns the
     full signal picture (rssi, exp_rssi, distance) per room per device
     instead of distances alone. The readable counterpart to scraping the raw
     `mqtt watch` firehose.
     """
-    topic_filter = f"{prefix}/rooms/+/devices/+"
+    topic_filter = device_topic_filter(prefix, device_id, room)
     records = mqtt_core.watch(
         host,
         topic_filter,
