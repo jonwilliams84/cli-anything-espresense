@@ -337,6 +337,27 @@ good needs both. Reference RSSI is written as the companion's `rssi@1m:` key
 `config doctor` now flags duplicate device ids, missing ids and non-numeric
 `rssi@1m` values as errors, unnamed devices as a warning.
 
+Beyond identity and reference RSSI, the `-config` commands also edit the
+companion's **per-device location filters** — the knobs that decide whether
+a beacon is tracked at all and what a fix must look like to be accepted:
+
+```bash
+cli-anything-espresense devices add-to-config 'tile:abc' \
+  --id-prefix-filter 'tile:' --distance 8 --accuracy 2 --no-discovery --file ./config.yaml
+cli-anything-espresense devices update-in-config 'irk:abc123' \
+  --include 'irk:abc,irk:def' --exclude 'ghost-id' --file ./config.yaml
+cli-anything-espresense devices update-in-config 'irk:abc123' \
+  --clear-distance --file ./config.yaml   # drop the clamp, back to the global default
+```
+
+`include:`/`exclude:`/`id_prefix_filter:` are comma-separated id
+lists/prefixes, `accuracy:` and `distance:` are clamps in metres that must be
+> 0 (a zero or negative clamp would disable the device, so it is refused),
+`discovery:` controls the Home Assistant entity, and every filter has a
+`--clear-*` twin so it can be removed entirely rather than only ever
+overwritten. `list-in-config` / `show-in-config` promote these fields to
+columns/keys in their summaries; unknown future keys still land under `extra`.
+
 ### Tune timeouts, MQTT, locators and optimizers
 
 Everything in config.yaml that is *not* a floor, room, node or device is
@@ -412,7 +433,7 @@ is the `absorption` setting) for a reading you took at a known distance.
 | `node info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete / calibrate` | Direct HTTP to one ESP node, incl. device distance calibration |
 | `devices list / show / set / delete` | Tracked devices, companion runtime view (phones, tags, beacons) |
 | `devices whereis / occupancy` | Live presence queries: last known position of one device; who is in which room right now |
-| `devices list-in-config / show-in-config / add-to-config / update-in-config / remove-from-config` | The durable `devices:` block of config.yaml |
+| `devices list-in-config / show-in-config / add-to-config / update-in-config / remove-from-config` | The durable `devices:` block of config.yaml, incl. the per-device location filters (`--include`/`--exclude`/`--id-prefix-filter`, `--accuracy`/`--distance` clamps, `--discovery`, each with a `--clear-*` twin) |
 | `settings show / get / set / unset / locators / locator / optimizers / optimizer` | Tuning half of config.yaml: timeouts, mqtt, gps, locators, optimizers |
 | `companion settings-keys / settings-get / settings-set` + `mqtt set-global` | Global settings *outside* config.yaml (`/api/settings`, mirrored on MQTT) |
 | `calibration get / summary / reset / auto-optimize / compute` | Calibration matrix + autocalibration; `compute` turns a measured reading + known distance into an rssi@1m config value (pure maths, no transport) |

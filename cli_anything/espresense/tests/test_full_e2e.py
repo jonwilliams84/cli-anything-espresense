@@ -2331,3 +2331,132 @@ class TestMqttTopicsWorkflow:
         assert inventory["families"]["device_config"] == devices["count"]
         assert settings["settings"]["expiration"] == 300
         assert devices["devices"]["apple:1005:9-12"] == {"name": "Watch"}
+
+
+# ── devices in config.yaml: per-device location filters ──────────────────────
+
+
+DEVICES_FILTER_YAML = """\
+devices:
+  - id: "irk:aaa"
+    name: Phone
+    "rssi@1m": -65
+  - id: tile-1
+"""
+
+
+class TestDeviceFiltersE2E:
+    """`devices ...-config --include/--exclude/--id-prefix-filter/--accuracy/
+
+    --distance/--discovery` against a real config.yaml on disk."""
+
+    DEVICES_YAML = None
+
+    @pytest.fixture()
+    def env(self, tmp_path, monkeypatch):
+        profile = tmp_path / "profile.json"
+        profile.write_text("{}")
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", profile)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(DEVICES_FILTER_YAML, encoding="utf-8")
+
+        def run(*args, json_out=True):
+            argv = ["--config", str(profile)]
+            if json_out:
+                argv.append("--json")
+            argv.extend(args)
+            argv.extend(["--file", str(cfg)])
+            return CliRunner().invoke(cli, argv)
+
+        run.cfg = cfg  # type: ignore[attr-defined]
+        return run
+
+    def payload(self, result):
+        assert result.exit_code == 0, result.output
+        return json.loads(result.output)
+
+    def test_add_device_with_filters(self, env):
+        out = self.payload(
+            env(
+                "devices",
+                "add-to-config",
+                "beacon-9",
+                "--name",
+                "Keys",
+                "--include",
+                "irk:abc,tile:1",
+                "--distance",
+                "8",
+                "--no-discovery",
+            )
+        )
+        assert out["added"] is True
+        assert out["include"] == "irk:abc,tile:1"
+        assert out["distance"] == 8
+        assert out["discovery"] is False
+        text = env.cfg.read_text()
+        assert "include: irk:abc,tile:1" in text
+        assert "distance: 8" in text
+        assert "discovery: false" in text
+
+    def test_add_rejects_a_zero_clamp(self, env):
+        res = env("devices", "add-to-config", "beacon-9", "--accuracy", "0")
+        assert res.exit_code == 1
+        assert "must be > 0" in res.output
+
+    def test_add_with_prefix_filter(self, env):
+        self.payload(env("devices", "add-to-config", "t1", "--id-prefix-filter", "tile:"))
+        rows = {r["id"]: r for r in self.payload(env("devices", "list-in-config"))}
+        assert rows["t1"]["id_prefix_filter"] == "tile:"
+
+    def test_update_device_filters(self, env):
+        out = self.payload(env("devices", "update-in-config", "tile-1", "--distance", "10.5"))
+        assert out["changed"] == ["distance"]
+        assert out["after"]["distance"] == 10.5
+
+    def test_update_clears_a_filter(self, env):
+        self.payload(env("devices", "update-in-config", "tile-1", "--distance", "10"))
+        out = self.payload(env("devices", "update-in-config", "tile-1", "--clear-distance"))
+        assert out["changed"] == ["distance"]
+        assert "distance" not in env.cfg.read_text()
+
+    def test_update_set_and_clear_conflict(self, env):
+        res = env("devices", "update-in-config", "tile-1", "--distance", "10", "--clear-distance")
+        assert res.exit_code == 1
+        assert "not both" in res.output
+
+    def test_update_nothing_to_change(self, env):
+        res = env("devices", "update-in-config", "tile-1")
+        assert res.exit_code == 1
+        assert "nothing to change" in res.output
+
+    def test_update_discovery_flag(self, env):
+        out = self.payload(env("devices", "update-in-config", "tile-1", "--discovery"))
+        assert out["changed"] == ["discovery"]
+        assert out["after"]["discovery"] is True
+
+    def test_show_in_config_reports_filters(self, env):
+        self.payload(env("devices", "update-in-config", "tile-1", "--exclude", "ghost"))
+        row = self.payload(env("devices", "show-in-config", "tile-1"))
+        assert row["exclude"] == "ghost"
+
+    def test_dry_run_does_not_write_filters(self, env):
+        before = env.cfg.read_text()
+        out = self.payload(env("devices", "add-to-config", "b9", "--distance", "5", "--dry-run"))
+        assert out["dry_run"] is True
+        assert env.cfg.read_text() == before
+
+    def test_filter_workflow_add_then_verify(self, env):
+        """fetch-free offline loop: add a filtered device, verify it reads
+        back with the filters in place, then tune the clamp down."""
+        self.payload(
+            env("devices", "add-to-config", "watch-1", "--distance", "12", "--accuracy", "3")
+        )
+        row = {r["id"]: r for r in self.payload(env("devices", "list-in-config"))}["watch-1"]
+        assert row["distance"] == 12 and row["accuracy"] == 3
+        self.payload(env("devices", "update-in-config", "watch-1", "--distance", "7"))
+        row = {r["id"]: r for r in self.payload(env("devices", "list-in-config"))}["watch-1"]
+        assert row["distance"] == 7 and row["accuracy"] == 3
+        text = env.cfg.read_text()
+        assert "distance: 7" in text
+        assert "accuracy: 3" in text

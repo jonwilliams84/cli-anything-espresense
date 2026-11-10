@@ -24,8 +24,11 @@ per-node ESP32 web UI, and direct MQTT — behind a single Click CLI with full
   placing nodes at room centroids instead of hand-computed coordinates.
 - Renaming or rotating room labels — and fixing every node `room:`
   reference in the same operation.
-- Curating which beacons are tracked (`devices ...-config`) and what their
-  reference RSSI is, durably in `config.yaml` rather than in runtime state.
+- Curating which beacons are tracked (`devices ...-config`), what their
+  reference RSSI is, and their **per-device location filters** —
+  `include` / `exclude` / `id_prefix_filter`, the `accuracy` / `distance`
+  clamps and the `discovery` flag — durably in `config.yaml` rather than in
+  runtime state.
 - Tuning behaviour: timeouts, MQTT connection, GPS origin, which localisation
   algorithm runs, which autocalibration optimizers run (`settings`).
 - Reading or setting the companion's **global settings** — telemetry,
@@ -81,7 +84,7 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `nodes` | `nodes list`, `nodes show <id>`, `nodes add <name> --room "Office" --point 1,2,3`, `nodes place <name> --room "Office"`, `nodes remove-from-config <name>`, `nodes rename-in-config <old> <new>`, `nodes set-point <name> X Y Z`, `nodes restart <id>`, `nodes delete <id>`, `nodes update-firmware <id> <url>`, `nodes put-settings <id> '{"calibration":{"absorption":2.8}}'` |
 | `node` | `node info <ip>`, `node restart <ip>`, `node reboot <ip>`, `node settings <ip> --section extras`, `node set <ip> absorption=2.8`, `node rename <ip> <new-name>`, `node devices <ip>`, `node config-list <ip>`, `node config-set <ip> <device-id> --name X --rssi-at-1m -59`, `node config-delete <ip> <device-id>`, `node calibrate <ip> <device-id> <metres>` (firmware calibration flow: device held at a known distance) |
 | `devices` (runtime) | `devices list`, `devices show <id>`, `devices set <id> --name "Jon Phone" --ref-rssi -59`, `devices delete <id>`, `devices whereis <id>` (last known position), `devices occupancy [--floor <floor>]` (who is in which room) |
-| `devices` (config.yaml) | `devices list-in-config`, `devices show-in-config <id>`, `devices add-to-config 'irk:abc' --name "Jon Phone" --rssi-at-1m -65`, `devices update-in-config 'irk:abc' --rssi-at-1m -61`, `devices remove-from-config 'irk:abc'` |
+| `devices` (config.yaml) | `devices list-in-config`, `devices show-in-config <id>`, `devices add-to-config 'irk:abc' --name "Jon Phone" --rssi-at-1m -65`, `devices add-to-config 'tile:abc' --id-prefix-filter 'tile:' --distance 8 --accuracy 2 --no-discovery`, `devices update-in-config 'irk:abc' --rssi-at-1m -61`, `devices update-in-config 'irk:abc' --include 'irk:abc,irk:def' --exclude 'ghost-id'`, `devices update-in-config 'irk:abc' --clear-distance`, `devices remove-from-config 'irk:abc'` (filters decide what gets tracked and what fixes are accepted; every filter has a `--clear-*` twin) |
 | `settings` | `settings show`, `settings show --section mqtt`, `settings get locators.nelder_mead.enabled`, `settings set away_timeout 300`, `settings unset weighting.algorithm`, `settings locators`, `settings locator nadaraya_watson off`, `settings optimizers`, `settings optimizer absorption off` |
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on`, `calibration compute <rssi> <metres> [--absorption N]` (pure maths: a reading taken at a known distance → the `rssi@1m` config value; RSSI is signed, pass it like coordinates) |
 | `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50`, `history trail <device-id>` (movement summary: room segments per visit, first/last seen, rooms visited), `history heatmap [--device <id>]... [--limit N]` (room usage across all tracked devices: points, visits, dwell seconds, devices per room, most-used first) |
@@ -245,6 +248,18 @@ those with `rooms repoint-node` first, or pass `--force` and accept that
 companion's runtime settings/telemetry, `nodes remove-from-config <name>`
 removes the entry from `config.yaml`. Beacons work the same way: `devices
 delete <id>` is runtime, `devices remove-from-config <id>` is config.yaml.
+
+**Per-device location filters live in config.yaml too.** A noisy beacon that
+should not be tracked, or one that only reports good fixes nearby, is tuned
+with `devices add-to-config` / `devices update-in-config`:
+`--include`/`--exclude`/`--id-prefix-filter` (comma-separated id lists /
+prefixes) gate whether the device is tracked at all, `--distance` and
+`--accuracy` clamp every fix to those metres (must be > 0 — a zero or
+negative clamp would disable the device, so the command refuses it), and
+`--discovery/--no-discovery` controls the Home Assistant entity. Every
+filter has a `--clear-*` twin (`--clear-distance`, ...) to drop the field
+back to the global default. `list-in-config` / `show-in-config` report the
+filters as columns/keys.
 
 **`settings` is the schema-free half of `config.yaml`.** Address any tuning
 key by dotted path (`settings set locators.nelder_mead.enabled false`) — it

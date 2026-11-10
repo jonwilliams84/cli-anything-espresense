@@ -24,6 +24,18 @@ alias). `@` is awkward in shell and JSON-path contexts, so the CLI spells it
 single place the on-disk spelling is written. Configs in the wild also carry
 the underscored spelling, so reads accept both and writes normalise to the
 alias the companion actually parses.
+
+Beyond identity and reference RSSI, the companion's per-device settings are
+the **location filters**: `discovery` (create a Home Assistant entity for
+this device), `include` / `exclude` (comma-separated id lists), a
+`id_prefix_filter` (only ids starting with one of these prefixes are
+tracked), and the clamp pair `accuracy` (max accepted accuracy in metres)
+and `distance` (max accepted distance in metres). These are what stop a
+noisy beacon from being located, tracked or exported — the same knobs the
+companion's device settings UI exposes, editable here durably so a
+restart re-applies them. Strings are written as strings, the numeric pair
+must be positive (a zero or negative clamp would disable the device), and
+`update` accepts None to clear a field back to the global default.
 """
 
 from __future__ import annotations
@@ -35,9 +47,38 @@ from cli_anything.espresense.utils import yaml_io
 RSSI_KEY = "rssi@1m"
 _RSSI_ALIASES = (RSSI_KEY, "rssi_at_1m")
 
+# The location-filter fields. On-disk spelling is fixed; the CLI spells the
+# snake_case ones with dashes (`--id-prefix-filter`).
+FILTER_FIELDS: dict[str, str] = {
+    "discovery": "bool",
+    "include": "string",
+    "exclude": "string",
+    "id_prefix_filter": "string",
+    "accuracy": "number",
+    "distance": "number",
+}
+
 # Keys the summary rows promote to columns; anything else is preserved on
 # disk but reported under `extra` so an unknown future field is never lost.
-_KNOWN = {"id", "name", *_RSSI_ALIASES}
+_KNOWN = {"id", "name", *FILTER_FIELDS, *_RSSI_ALIASES}
+
+
+def _coerce_filter(kind: str, value: Any, field: str) -> Any:
+    """Coerce one location-filter value to the shape that belongs on disk."""
+    if kind == "bool":
+        return bool(value)
+    if kind == "string":
+        text = str(value).strip()
+        if not text:
+            raise DeviceConfigError(f"{field} must be a non-empty filter string")
+        return text
+    # number: the clamp pair — positive and finite, ints stay integral
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise DeviceConfigError(f"{field} must be a number, got {value!r}")
+    number = float(value)
+    if not number > 0:
+        raise DeviceConfigError(f"{field} must be > 0 (a clamp of {value} disables the device)")
+    return int(number) if number == int(number) else number
 
 
 class DeviceConfigError(ValueError):
@@ -63,13 +104,17 @@ def _read_rssi(entry: Any) -> Optional[float]:
 
 def _row(entry: Any, index: int) -> dict:
     extra = {k: v for k, v in entry.items() if k not in _KNOWN}
-    return {
+    row = {
         "index": index,
         "id": entry.get("id"),
         "name": entry.get("name"),
         "rssi_at_1m": _read_rssi(entry),
-        "extra": extra or None,
     }
+    for field in FILTER_FIELDS:
+        if field in entry:
+            row[field] = entry[field]
+    row["extra"] = extra or None
+    return row
 
 
 def list_devices(parsed: Any) -> list[dict]:
@@ -99,12 +144,21 @@ def add(
     *,
     name: Optional[str] = None,
     rssi_at_1m: Optional[float] = None,
+    discovery: Optional[bool] = None,
+    include: Optional[str] = None,
+    exclude: Optional[str] = None,
+    id_prefix_filter: Optional[str] = None,
+    accuracy: Optional[float] = None,
+    distance: Optional[float] = None,
 ) -> dict:
     """Append a tracked device. Refuses duplicate ids.
 
     The companion keys `devices:` by `id`, so a second entry with the same id
     shadows the first exactly like a duplicate node name does — better to
     refuse than to write a config whose behaviour depends on list order.
+    The location-filter keywords (`discovery`, `include`, `exclude`,
+    `id_prefix_filter`, `accuracy`, `distance`) mirror the companion's
+    per-device settings; None leaves that field out of the entry entirely.
     """
     if device_id is None or not str(device_id).strip():
         raise DeviceConfigError("device id must be non-empty")
@@ -118,13 +172,29 @@ def add(
         entry["name"] = str(name)
     if rssi_at_1m is not None:
         entry[yaml_io.dq(RSSI_KEY)] = _coerce_rssi(rssi_at_1m)
+    given = {
+        "discovery": discovery,
+        "include": include,
+        "exclude": exclude,
+        "id_prefix_filter": id_prefix_filter,
+        "accuracy": accuracy,
+        "distance": distance,
+    }
+    for field, value in given.items():
+        if value is None:
+            continue
+        entry[field] = _coerce_filter(FILTER_FIELDS[field], value, field)
     parsed["devices"].append(entry)
-    return {
+    out = {
         "added": True,
         "id": device_id,
         "name": entry.get("name"),
         "rssi_at_1m": _read_rssi(entry),
     }
+    for field in FILTER_FIELDS:
+        if field in entry:
+            out[field] = entry[field]
+    return out
 
 
 def _id_scalar(device_id: str) -> Any:
@@ -151,13 +221,21 @@ def update(
     name: Any = _UNSET,
     rssi_at_1m: Any = _UNSET,
     new_id: Optional[str] = None,
+    discovery: Any = _UNSET,
+    include: Any = _UNSET,
+    exclude: Any = _UNSET,
+    id_prefix_filter: Any = _UNSET,
+    accuracy: Any = _UNSET,
+    distance: Any = _UNSET,
 ) -> dict:
     """Edit one device in place. Returns {found, changed, before, after}.
 
     Passing an explicit None for `name`/`rssi_at_1m` removes that key (so a
     mis-set reference RSSI can be dropped back to the global default rather
     than only ever overwritten). Renaming the id refuses a collision, for the
-    same reason `add` does.
+    same reason `add` does. The location-filter keywords follow the same
+    _UNSET/None protocol: untouched by default, None deletes the key, a
+    value coerces via `_coerce_filter` and reports itself as changed.
     """
     entry = find(parsed, device_id)
     if entry is None:
@@ -203,6 +281,27 @@ def update(
                 key = RSSI_KEY if RSSI_KEY in entry else yaml_io.dq(RSSI_KEY)
                 entry[key] = value
                 changed.append("rssi_at_1m")
+
+    given = {
+        "discovery": discovery,
+        "include": include,
+        "exclude": exclude,
+        "id_prefix_filter": id_prefix_filter,
+        "accuracy": accuracy,
+        "distance": distance,
+    }
+    for field, value in given.items():
+        if value is _UNSET:
+            continue
+        if value is None:
+            if field in entry:
+                del entry[field]
+                changed.append(field)
+        else:
+            new_value = _coerce_filter(FILTER_FIELDS[field], value, field)
+            if field not in entry or entry[field] != new_value:
+                entry[field] = new_value
+                changed.append(field)
 
     after = _row(entry, -1)
     before.pop("index", None)
