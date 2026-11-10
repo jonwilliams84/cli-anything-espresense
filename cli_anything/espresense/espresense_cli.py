@@ -1729,20 +1729,83 @@ def devices_show_in_config(ctx, device_id, config_file):
     type=float,
     help="Reference RSSI at 1 m for this beacon (written as `rssi@1m:`)",
 )
+@click.option(
+    "--discovery/--no-discovery",
+    default=None,
+    help="Create a Home Assistant entity for this device (per-device `discovery:`)",
+)
+@click.option(
+    "--include",
+    default=None,
+    help="Comma-separated id list — only these ids are tracked (`include:`)",
+)
+@click.option(
+    "--exclude",
+    default=None,
+    help="Comma-separated id list to ignore (`exclude:`)",
+)
+@click.option(
+    "--id-prefix-filter",
+    default=None,
+    help="Comma-separated prefixes — only ids starting with one are tracked (`id_prefix_filter:`)",
+)
+@click.option(
+    "--accuracy",
+    default=None,
+    type=float,
+    help="Max accepted accuracy in metres (`accuracy:`). Must be > 0",
+)
+@click.option(
+    "--distance",
+    default=None,
+    type=float,
+    help="Max accepted distance in metres (`distance:`). Must be > 0",
+)
 @click.option("--restart/--no-restart", default=False)
 @click.option("--dry-run", is_flag=True)
 @config_file_option
 @click.pass_context
-def devices_add_to_config(ctx, device_id, name, rssi_at_1m, restart, dry_run, config_file):
+def devices_add_to_config(
+    ctx,
+    device_id,
+    name,
+    rssi_at_1m,
+    discovery,
+    include,
+    exclude,
+    id_prefix_filter,
+    accuracy,
+    distance,
+    restart,
+    dry_run,
+    config_file,
+):
     """Add a tracked device to config.yaml.
 
+    Identity (`--name`, `--rssi-at-1m`) plus the companion's per-device
+    location filters: `--include`/`--exclude`/`--id-prefix-filter` decide
+    whether the device is tracked at all, `--accuracy` and `--distance`
+    clamp the fixes it accepts, and `--discovery/--no-discovery` controls
+    the Home Assistant entity.
+
     Example:
-      devices add-to-config 'irk:abc123' --name Phone --rssi-at-1m -65
+      devices add-to-config 'irk:abc123' --name Phone --rssi-at-1m -65 --distance 8
     """
     source = make_config_source(ctx, config_file)
     _, parsed = source.fetch()
     try:
-        out = config_devices_core.add(parsed, device_id, name=name, rssi_at_1m=rssi_at_1m)
+        out = config_devices_core.add(
+            parsed,
+            device_id,
+            name=name,
+            rssi_at_1m=rssi_at_1m,
+            discovery=discovery,
+            include=include,
+            exclude=exclude,
+            id_prefix_filter=id_prefix_filter,
+            accuracy=accuracy,
+            distance=distance,
+        )
     except config_devices_core.DeviceConfigError as exc:
         _abort(str(exc))
         return
@@ -1758,23 +1821,66 @@ def devices_add_to_config(ctx, device_id, name, rssi_at_1m, restart, dry_run, co
 @click.option("--clear-name", is_flag=True, help="Remove the device's `name:`")
 @click.option("--rssi-at-1m", default=None, type=float, help="New reference RSSI at 1 m")
 @click.option("--clear-rssi", is_flag=True, help="Remove the device's `rssi@1m:`")
+@click.option(
+    "--discovery/--no-discovery", default=None, help="Set the per-device `discovery:` flag"
+)
+@click.option("--include", default=None, help="New comma-separated include list")
+@click.option("--exclude", default=None, help="New comma-separated exclude list")
+@click.option("--id-prefix-filter", default=None, help="New comma-separated prefix filter")
+@click.option("--accuracy", default=None, type=float, help="New max accuracy in metres")
+@click.option("--distance", default=None, type=float, help="New max distance in metres")
+@click.option("--clear-include", is_flag=True, help="Remove the device's `include:`")
+@click.option("--clear-exclude", is_flag=True, help="Remove the device's `exclude:`")
+@click.option(
+    "--clear-id-prefix-filter", is_flag=True, help="Remove the device's `id_prefix_filter:`"
+)
+@click.option("--clear-accuracy", is_flag=True, help="Remove the device's `accuracy:`")
+@click.option("--clear-distance", is_flag=True, help="Remove the device's `distance:`")
 @click.option("--new-id", default=None, help="Rewrite the device's `id:`")
 @click.option("--restart/--no-restart", default=False)
 @click.option("--dry-run", is_flag=True)
 @config_file_option
 @click.pass_context
 def devices_update_in_config(
-    ctx, device_id, name, clear_name, rssi_at_1m, clear_rssi, new_id, restart, dry_run, config_file
+    ctx,
+    device_id,
+    name,
+    clear_name,
+    rssi_at_1m,
+    clear_rssi,
+    discovery,
+    include,
+    exclude,
+    id_prefix_filter,
+    accuracy,
+    distance,
+    clear_include,
+    clear_exclude,
+    clear_id_prefix_filter,
+    clear_accuracy,
+    clear_distance,
+    new_id,
+    restart,
+    dry_run,
+    config_file,
 ):
-    """Edit a configured device's name / reference RSSI / id."""
+    """Edit a configured device's name, reference RSSI, id or location filters.
+
+    Each filter has a set-flag and a `--clear-` twin (passing both is an
+    error), so a mistuned clamp can be dropped back to the global default
+    with `--clear-accuracy` rather than only ever overwritten.
+    """
     if clear_name and name is not None:
         _abort("pass either --name or --clear-name, not both")
     if clear_rssi and rssi_at_1m is not None:
         _abort("pass either --rssi-at-1m or --clear-rssi, not both")
-    if not any([clear_name, clear_rssi, name is not None, rssi_at_1m is not None, new_id]):
-        _abort("nothing to change: pass --name/--rssi-at-1m/--new-id or a --clear-* flag")
-    source = make_config_source(ctx, config_file)
-    _, parsed = source.fetch()
+    filter_pairs = [
+        ("include", clear_include),
+        ("exclude", clear_exclude),
+        ("id_prefix_filter", clear_id_prefix_filter),
+        ("accuracy", clear_accuracy),
+        ("distance", clear_distance),
+    ]
     kwargs: dict = {}
     if clear_name:
         kwargs["name"] = None
@@ -1784,6 +1890,38 @@ def devices_update_in_config(
         kwargs["rssi_at_1m"] = None
     elif rssi_at_1m is not None:
         kwargs["rssi_at_1m"] = rssi_at_1m
+    if discovery is not None:
+        kwargs["discovery"] = discovery
+    values = {
+        "include": include,
+        "exclude": exclude,
+        "id_prefix_filter": id_prefix_filter,
+        "accuracy": accuracy,
+        "distance": distance,
+    }
+    for field, clear_flag in filter_pairs:
+        flag = f"--{field.replace('_', '-')}"
+        clear = f"--clear-{field.replace('_', '-')}"
+        if clear_flag and values[field] is not None:
+            _abort(f"pass either {flag} or {clear}, not both")
+        if clear_flag:
+            kwargs[field] = None
+        elif values[field] is not None:
+            kwargs[field] = values[field]
+    covered = (
+        clear_name,
+        clear_rssi,
+        name is not None,
+        rssi_at_1m is not None,
+        discovery is not None,
+        new_id,
+    )
+    if not any(covered) and not kwargs:
+        _abort(
+            "nothing to change: pass --name/--rssi-at-1m/--new-id, a filter option or a --clear-* flag"
+        )
+    source = make_config_source(ctx, config_file)
+    _, parsed = source.fetch()
     try:
         out = config_devices_core.update(parsed, device_id, new_id=new_id, **kwargs)
     except config_devices_core.DeviceConfigError as exc:

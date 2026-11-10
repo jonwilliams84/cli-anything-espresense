@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 from cli_anything.espresense.core import (
     calibration as calibration_core,
+    config_devices as config_devices_core,
     config_yaml as config_yaml_core,
     global_settings as global_settings_core,
     history as history_core,
@@ -2216,3 +2217,141 @@ class TestFirmwareDeviceTopic:
     def test_distances_from_firmware_records(self):
         snap = telemetry_core.aggregate_distances([self._rec("dining_room")])
         assert snap["devices"]["tile:d5a89ae7ad29"]["dining_room"]["distance"] == 0.01
+
+
+# ── devices in config.yaml: the per-device location filters ─────────────────
+
+
+class TestConfigDeviceFilters:
+    """`core/config_devices` — filter fields beyond id/name/rssi@1m."""
+
+    BASE = 'devices:\n  - id: "irk:aaa"\n    name: Phone\n'
+
+    @pytest.fixture
+    def cfg(self):
+        return yaml_io.load(self.BASE)
+
+    def _yaml(self, cfg):
+        return yaml_io.dumps(cfg)
+
+    # ── add ──────────────────────────────────────────────────────────────
+
+    def test_add_with_every_filter_field(self):
+        cfg = yaml_io.load(self.BASE)
+        out = config_devices_core.add(
+            cfg,
+            "beacon-9",
+            discovery=False,
+            include="irk:abc,tile:1",
+            exclude="ghost",
+            id_prefix_filter="irk:",
+            accuracy=1.5,
+            distance=8,
+        )
+        assert out["added"] is True
+        for field, expected in [
+            ("discovery", False),
+            ("include", "irk:abc,tile:1"),
+            ("exclude", "ghost"),
+            ("id_prefix_filter", "irk:"),
+            ("accuracy", 1.5),
+            ("distance", 8),
+        ]:
+            assert out[field] == expected
+
+    def test_add_filter_fields_land_on_disk(self):
+        cfg = yaml_io.load(self.BASE)
+        config_devices_core.add(cfg, "beacon-9", distance=8, include="a,b")
+        text = self._yaml(cfg)
+        assert "distance: 8" in text
+        assert "include: a,b" in text
+
+    def test_add_integral_clamps_stay_integral(self):
+        cfg = yaml_io.load(self.BASE)
+        config_devices_core.add(cfg, "b", accuracy=3, distance=10)
+        text = self._yaml(cfg)
+        assert "accuracy: 3" in text
+        assert "distance: 10" in text
+
+    def test_add_none_fields_are_absent(self):
+        cfg = yaml_io.load(self.BASE)
+        config_devices_core.add(cfg, "b")
+        assert "include" not in self._yaml(cfg)
+
+    def test_add_refuses_zero_clamp(self):
+        cfg = yaml_io.load(self.BASE)
+        with pytest.raises(config_devices_core.DeviceConfigError):
+            config_devices_core.add(cfg, "b", distance=0)
+
+    def test_add_refuses_negative_clamp(self):
+        cfg = yaml_io.load(self.BASE)
+        with pytest.raises(config_devices_core.DeviceConfigError, match="accuracy"):
+            config_devices_core.add(cfg, "b", accuracy=-1)
+
+    def test_add_refuses_empty_filter_string(self):
+        cfg = yaml_io.load(self.BASE)
+        with pytest.raises(config_devices_core.DeviceConfigError, match="include"):
+            config_devices_core.add(cfg, "b", include="   ")
+
+    # ── rows ─────────────────────────────────────────────────────────────
+
+    def test_rows_promote_filter_fields(self):
+        cfg = yaml_io.load(self.BASE)
+        config_devices_core.add(cfg, "b", discovery=False, distance=8)
+        rows = config_devices_core.list_devices(cfg)
+        assert rows[1]["distance"] == 8
+        assert rows[1]["discovery"] is False
+
+    def test_rows_keep_unknown_keys_in_extra(self):
+        cfg = yaml_io.load(
+            "devices:\n  - id: a\n    unknown_future_key: keep-me\n    distance: 5\n"
+        )
+        row = config_devices_core.list_devices(cfg)[0]
+        assert row["extra"] == {"unknown_future_key": "keep-me"}
+        assert row["distance"] == 5
+
+    # ── update ───────────────────────────────────────────────────────────
+
+    def test_update_sets_and_reports_filters(self, cfg):
+        out = config_devices_core.update(cfg, "irk:aaa", include="a,b", exclude="ghost")
+        assert set(out["changed"]) == {"include", "exclude"}
+        assert out["after"]["include"] == "a,b"
+
+    def test_update_clears_a_filter(self, cfg):
+        config_devices_core.update(cfg, "irk:aaa", distance=8)
+        out = config_devices_core.update(cfg, "irk:aaa", distance=None)
+        assert out["changed"] == ["distance"]
+        assert "distance" not in cfg["devices"][0]
+
+    def test_update_clearing_an_absent_filter_changes_nothing(self, cfg):
+        out = config_devices_core.update(cfg, "irk:aaa", include=None)
+        assert out["changed"] == []
+
+    def test_update_untouched_fields_survive(self, cfg):
+        config_devices_core.update(cfg, "irk:aaa", exclude="ghost")
+        text = self._yaml(cfg)
+        assert "name: Phone" in text
+
+    def test_update_to_the_same_value_changes_nothing(self, cfg):
+        config_devices_core.update(cfg, "irk:aaa", include="a,b")
+        out = config_devices_core.update(cfg, "irk:aaa", include="a,b")
+        assert out["changed"] == []
+
+    def test_update_refuses_bad_clamp(self, cfg):
+        with pytest.raises(config_devices_core.DeviceConfigError):
+            config_devices_core.update(cfg, "irk:aaa", distance=0)
+
+    def test_update_allows_discovery_flag(self, cfg):
+        out = config_devices_core.update(cfg, "irk:aaa", discovery=True)
+        assert out["changed"] == ["discovery"]
+        assert out["after"]["discovery"] is True
+
+    # ── round trip with the rest of the block ────────────────────────────
+
+    def test_full_edit_cycle_is_reversible(self):
+        text = "devices:\n  - id: a\n    name: A\n"
+        cfg = yaml_io.load(text)
+        config_devices_core.add(cfg, "b", include="x", distance=5)
+        config_devices_core.update(cfg, "b", distance=None)
+        config_devices_core.remove(cfg, "b")
+        assert self._yaml(cfg) == text

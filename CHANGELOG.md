@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.15.0] — 2026-11-10
+
+- **New: the companion's per-device location filters are editable.** Until now
+  `devices ...-config` could only curate a device's identity — `id`, `name`
+  and `rssi@1m`. But the companion's per-device settings are the *filters*:
+  `discovery` (create a Home Assistant entity), `include` / `exclude`
+  (comma-separated id lists), `id_prefix_filter` (only ids starting with one
+  of the prefixes are tracked) and the clamp pair `accuracy` / `distance`
+  (max accepted accuracy / distance in metres). Those decide whether a noisy
+  beacon is located, tracked or exported at all, and they live durably in
+  config.yaml — so until v0.15.0 tuning one still meant hand-editing YAML.
+  Commands changed:
+  - **`devices add-to-config`** gains `--include`, `--exclude`,
+    `--id-prefix-filter`, `--accuracy`, `--distance` and
+    `--discovery/--no-discovery`. `--accuracy` / `--distance` must be > 0 (a
+    zero or negative clamp would disable the device, so the command refuses
+    it); unset fields are left out of the entry entirely.
+  - **`devices update-in-config`** gains the same setters plus a `--clear-*`
+    twin per filter (`--clear-include`, `--clear-exclude`,
+    `--clear-id-prefix-filter`, `--clear-accuracy`, `--clear-distance`), so a
+    mistuned clamp can be dropped back to the global default rather than only
+    ever overwritten — the same `--clear-*` protocol `--name` / `--rssi-at-1m`
+    already follow. Passing both a setter and its clear twin is an error.
+  - **`devices list-in-config` / `show-in-config`** promote the filter fields
+    to summary columns/keys; keys the harness does not know are still
+    preserved on disk and reported under `extra`, so an unknown future field
+    is never lost.
+  - Everything else is unchanged: `--file`, `--dry-run`, timestamped `.bak`
+    backups, `--json` output and duplicate-id refusal all behave as before.
+  - Under the hood: `core/config_devices.py` grows `FILTER_FIELDS` (the
+    on-disk spellings and their kinds) and `_coerce_filter` (strings are
+    stripped and must be non-empty; the numeric pair must be positive and
+    integral where it can be), while `add` / `update` / the summary rows
+    learn the six fields. The module docstring records that this closes the
+    identity-only gap in the config-side device commands.
+  - Unit-tested in `test_core.py` (`TestConfigDeviceFilters`: add via every
+    filter field, on-disk spelling, integral clamps, absent keys for unset
+    fields, guard rails, promoted rows with `extra` intact, set/clear/
+    unchanged update semantics, and a full add → tune → clear → remove cycle
+    returning the original document); CLI behaviour pinned in
+    `test_full_e2e.py` (`TestDeviceFiltersE2E`: add with filters against a
+    real yaml via `--file`, zero-clamp exit 1, prefix-filter read-back,
+    update + `--clear-*`, setter/clear conflict, nothing-to-change exit 1,
+    `--discovery` flag, `show-in-config` reporting, `--dry-run` writing
+    nothing, and an add → verify → tune-down workflow).
+
 ## [0.14.1] — 2026-11-04
 
 - **Fix: `mqtt distances` and `mqtt sightings` saw nothing on real nodes.**

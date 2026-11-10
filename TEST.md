@@ -4,14 +4,14 @@ The suite runs against synthetic data on disk — no live companion, cluster,
 broker or node is ever contacted.
 
 ```bash
-python3 -m pytest cli_anything/espresense/tests/ -v          # 1714 tests
+python3 -m pytest cli_anything/espresense/tests/ -v          # 1748 tests
 python3 -m pytest cli_anything/espresense/tests/ \
   --cov=cli_anything --cov-fail-under=90 -q                  # CI gate shape
 ruff check cli_anything/ && ruff format --check cli_anything/
 bandit -r cli_anything/ -ll -x '*/tests/*,*/test_*.py,*/conftest.py'
 ```
 
-Current state: **1714 tests, all four gates green.**
+Current state: **1748 tests, all four gates green.**
 
 ## What is covered where
 
@@ -22,6 +22,7 @@ Current state: **1714 tests, all four gates green.**
 | `config doctor` | `test_validate.py` | `test_cli_refine.py` |
 | Floor CRUD, retag, bounds | `test_floors_core.py` | `test_cli_refine.py`, `test_cli_geometry.py` |
 | Device registry + tuning paths | `test_config_devices.py`, `test_settings_core.py` | `test_cli_settings_devices.py` |
+| **Per-device location filters in config.yaml (`devices add-to-config` / `update-in-config` with `--include`/`--exclude`/`--id-prefix-filter`/`--accuracy`/`--distance`/`--discovery` + `--clear-*` twins)** | `test_core.py` (`TestConfigDeviceFilters`: add via every filter field, on-disk spelling, integral clamps stay integral, absent keys for unset fields, zero/negative clamp and empty filter string refused, promoted summary rows with unknown keys still under `extra`, set/clear/idempotent-unchanged update semantics, full add → tune → clear → remove cycle returning the original document) | `test_full_e2e.py` (`TestDeviceFiltersE2E`: add with filters against a real yaml via `--file`, zero-clamp exit 1, prefix filter read-back, update + `--clear-*`, set/clear conflict, nothing-to-change, `--discovery` flag, `show-in-config` reports filters, `--dry-run` writes nothing, add → verify → tune-down workflow) |
 | Per-node firmware HTTP client | `test_mqtt_stream_nodes.py` | `test_cli.py` |
 | MQTT pub/sub payload handling | `test_mqtt.py`, `test_mqtt_stream_nodes.py` | `test_cli.py` |
 | **Global settings (`/api/settings` + MQTT mirror)** | `test_core.py` (`TestGlobalSettings*`, `TestMqttPublishGlobalSetting`) | `test_cli_refine.py` (`TestCompanionSettings*`, `TestMqttSetGlobal`) |

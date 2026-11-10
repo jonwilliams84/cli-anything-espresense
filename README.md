@@ -50,6 +50,7 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 | `nodes` | `list / show / add / place / remove-from-config / rename-in-config / set-point / restart / delete / update-firmware / put-settings` — manage nodes from the companion side |
 | `node` | `info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete / calibrate` — direct HTTP to one ESP firmware node, incl. the firmware's device distance calibration flow |
 | `devices` | `list / show / set / delete / whereis / occupancy` — tracked devices (phones, tags, beacons), incl. last-known position and live room occupancy |
+| `devices ...-config` | `list-in-config / show-in-config / add-to-config / update-in-config / remove-from-config` — the durable `devices:` block of config.yaml, incl. the companion's per-device location filters: `--include` / `--exclude` / `--id-prefix-filter` (comma-separated id lists / prefixes), `--accuracy` and `--distance` clamps (metres, > 0), `--discovery/--no-discovery` (HA entity), each filter with a `--clear-*` twin |
 | `calibration` | `get / summary / reset / auto-optimize / compute` — calibration matrix + autocalibration, plus a pure `compute` command turning a measured RSSI at a known distance into the `rssi@1m` value config.yaml wants |
 | `history` | `get / trail / heatmap` — per-device position history, a movement summary (room segments per visit, first/last seen, rooms visited in order), and a fleet-level room-usage heatmap (points, visits, dwell seconds and devices per room, across all tracked devices) |
 | `mqtt` | `set-node / set-device / set-global / pub / watch / get / settings / devices / topics / distances / sightings / node-status / telemetry` — raw MQTT pub/sub, read-back of retained broker state (any topic, the whole global-settings table, the whole per-device config table, and the full retained topic inventory with families and payload sizes — secrets redacted where applicable), plus aggregated live snapshots (node→device distances, per-room device sighting detail with rssi/exp_rssi + strongest/closest room, node online/offline, node health: uptime / free memory / RSSI / version) |
@@ -189,6 +190,22 @@ cli-anything-espresense devices add-to-config 'irk:abc123' \
 cli-anything-espresense devices update-in-config 'irk:abc123' --rssi-at-1m -61 --file cfg.yaml
 cli-anything-espresense devices remove-from-config 'irk:abc123' --file cfg.yaml
 
+# the companion's per-device location filters, same block, same --file:
+# what gets tracked at all, and what a fix must look like to be accepted
+cli-anything-espresense devices add-to-config 'tile:abc' \
+  --id-prefix-filter 'tile:' --distance 8 --accuracy 2 --no-discovery --file cfg.yaml
+cli-anything-espresense devices update-in-config 'irk:abc123' \
+  --include 'irk:abc,irk:def' --exclude 'ghost-id' --file cfg.yaml
+cli-anything-espresense devices update-in-config 'irk:abc123' \
+  --clear-distance --file cfg.yaml      # drop the clamp, back to the global default
+```
+
+`include:`/`exclude:`/`id_prefix_filter:` are comma-separated id lists/prefixes,
+`accuracy:` and `distance:` clamp the fixes the companion accepts (metres, must
+be > 0, and are refused otherwise), `discovery:` controls the Home Assistant
+entity, and each filter has a `--clear-*` twin so it can be removed entirely
+rather than only ever overwritten. `list-in-config` / `show-in-config` promote
+these fields to columns/keys in their summaries.
 # timeouts, mqtt, gps, locators, optimizers — addressed by dotted path
 cli-anything-espresense settings show --file cfg.yaml          # secrets redacted
 cli-anything-espresense settings set away_timeout 300 --file cfg.yaml
@@ -393,7 +410,7 @@ the file on start, hence the `--restart` flag on every mutating command.
 python3 -m pytest cli_anything/espresense/tests/ -v
 ```
 
-1714 tests, 98.4% coverage — all against synthetic data on disk, no live
+1748 tests, 98.4% coverage — all against synthetic data on disk, no live
 broker, cluster or companion required. They cover the YAML round-trip, room
 rename + rotate (including atomic cycles and trailing-whitespace handling),
 the polygon/bounds maths (including the cases where two rooms must *not* be
