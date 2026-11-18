@@ -1,6 +1,6 @@
 ---
 name: cli-anything-espresense
-description: CLI harness for the ESPresense ecosystem — read/edit/validate the companion's YAML config, rotate or rename rooms, add and reshape room polygons, manage floors and their bounds, place nodes by geometry, curate the tracked-device registry, tune timeouts/locators/optimizers by dotted path, set deployment-wide global settings over REST or MQTT, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry, query live presence (last-known position, node-to-device distances, node status, room occupancy), read back retained MQTT broker state, and aggregate fleet-level room usage from device history.
+description: CLI harness for the ESPresense ecosystem — read/edit/validate the companion's YAML config, rotate or rename rooms, add and reshape room polygons, manage floors and their bounds, place nodes by geometry, curate the tracked-device registry on both the durable config.yaml side and the live runtime side, tune timeouts/locators/optimizers by dotted path, set deployment-wide global settings over REST or MQTT, talk to individual ESP firmware web servers, push MQTT settings, stream live device telemetry, query live presence (last-known position, node-to-device distances, node status, room occupancy), read back retained MQTT broker state, and aggregate fleet-level room usage from device history.
 ---
 
 # cli-anything-espresense
@@ -25,7 +25,11 @@ per-node ESP32 web UI, and direct MQTT — behind a single Click CLI with full
 - Renaming or rotating room labels — and fixing every node `room:`
   reference in the same operation.
 - Curating which beacons are tracked (`devices ...-config`), what their
-  reference RSSI is, and their **per-device location filters** —
+  reference RSSI is, and their **per-device location filters** on both
+  transports: live on the companion runtime copy (`devices set <id>
+  --include/--exclude/--id-prefix-filter/--accuracy/--distance/
+  --discovery` — no push, no restart; the runtime store has no clear-twins,
+  so removal stays durable on `devices update-in-config --clear-*`), and
   `include` / `exclude` / `id_prefix_filter`, the `accuracy` / `distance`
   clamps and the `discovery` flag — durably in `config.yaml` rather than in
   runtime state.
@@ -83,7 +87,7 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `floors` | `floors list`, `floors show gf`, `floors add bs --name "Basement" --bounds "0,0,0 6,4,2.4"`, `floors rename bs "Cellar"`, `floors retag bs basement`, `floors set-bounds gf 0,0,0 10,8,2.4`, `floors fit-bounds gf --margin 0.25`, `floors delete bs --force` |
 | `nodes` | `nodes list`, `nodes show <id>`, `nodes add <name> --room "Office" --point 1,2,3`, `nodes place <name> --room "Office"`, `nodes remove-from-config <name>`, `nodes rename-in-config <old> <new>`, `nodes set-point <name> X Y Z`, `nodes restart <id>`, `nodes delete <id>`, `nodes update-firmware <id> <url>`, `nodes put-settings <id> '{"calibration":{"absorption":2.8}}'` |
 | `node` | `node info <ip>`, `node restart <ip>`, `node reboot <ip>`, `node settings <ip> --section extras`, `node set <ip> absorption=2.8`, `node rename <ip> <new-name>`, `node devices <ip>`, `node config-list <ip>`, `node config-set <ip> <device-id> --name X --rssi-at-1m -59`, `node config-delete <ip> <device-id>`, `node calibrate <ip> <device-id> <metres>` (firmware calibration flow: device held at a known distance) |
-| `devices` (runtime) | `devices list`, `devices show <id>`, `devices set <id> --name "Jon Phone" --ref-rssi -59`, `devices delete <id>`, `devices whereis <id>` (last known position), `devices occupancy [--floor <floor>]` (who is in which room) |
+| `devices` (runtime) | `devices list`, `devices show <id>`, `devices set <id> --name "Jon Phone" --ref-rssi -59` and `devices set <id> --distance 6 --accuracy 2 --no-discovery --include 'tile:1,tile:2' --id-prefix-filter 'tile:'` (live runtime edits incl. the location filters — no push, no restart; clearing a filter is durable, use update-in-config), `devices delete <id>`, `devices whereis <id>` (last known position), `devices occupancy [--floor <floor>]` (who is in which room) |
 | `devices` (config.yaml) | `devices list-in-config`, `devices show-in-config <id>`, `devices add-to-config 'irk:abc' --name "Jon Phone" --rssi-at-1m -65`, `devices add-to-config 'tile:abc' --id-prefix-filter 'tile:' --distance 8 --accuracy 2 --no-discovery`, `devices update-in-config 'irk:abc' --rssi-at-1m -61`, `devices update-in-config 'irk:abc' --include 'irk:abc,irk:def' --exclude 'ghost-id'`, `devices update-in-config 'irk:abc' --clear-distance`, `devices remove-from-config 'irk:abc'` (filters decide what gets tracked and what fixes are accepted; every filter has a `--clear-*` twin) |
 | `settings` | `settings show`, `settings show --section mqtt`, `settings get locators.nelder_mead.enabled`, `settings set away_timeout 300`, `settings unset weighting.algorithm`, `settings locators`, `settings locator nadaraya_watson off`, `settings optimizers`, `settings optimizer absorption off` |
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on`, `calibration compute <rssi> <metres> [--absorption N]` (pure maths: a reading taken at a known distance → the `rssi@1m` config value; RSSI is signed, pass it like coordinates) |

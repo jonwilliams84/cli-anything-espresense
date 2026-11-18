@@ -1664,18 +1664,63 @@ def devices_show(ctx, device_id):
 @click.option("--anchor-x", default=None, type=float)
 @click.option("--anchor-y", default=None, type=float)
 @click.option("--anchor-z", default=None, type=float)
+@click.option(
+    "--discovery/--no-discovery",
+    default=None,
+    help="Whether the companion creates a Home Assistant entity for it",
+)
+@click.option("--include", default=None, help="Only track ids in this comma-separated list")
+@click.option("--exclude", default=None, help="Never track ids in this comma-separated list")
+@click.option(
+    "--id-prefix-filter", default=None, help="Only track ids starting with one of these prefixes"
+)
+@click.option("--accuracy", default=None, type=float, help="Max accepted accuracy, metres (> 0)")
+@click.option("--distance", default=None, type=float, help="Max accepted distance, metres (> 0)")
 @click.pass_context
-def devices_set(ctx, device_id, name, ref_rssi, anchor_x, anchor_y, anchor_z):
+def devices_set(
+    ctx,
+    device_id,
+    name,
+    ref_rssi,
+    anchor_x,
+    anchor_y,
+    anchor_z,
+    discovery,
+    include,
+    exclude,
+    id_prefix_filter,
+    accuracy,
+    distance,
+):
+    """Edit a tracked device's LIVE runtime settings (no push, no restart).
+
+    Takes identity fields (name / ref-rssi / anchors), the discovery toggle
+    and the same location filters `devices ...-config` writes durably — here
+    against the companion's runtime copy via PUT /api/device/<id>, effective
+    immediately. Only the fields you pass change everything; the runtime
+    copy has no clear-twins (a cleared filter is a durable change — use
+    `devices update-in-config --clear-*` plus a restart for that).
+    """
     client = make_client(ctx)
-    out = devices_core.update_device(
-        client,
-        device_id,
-        name=name,
-        ref_rssi=ref_rssi,
-        anchored_x=anchor_x,
-        anchored_y=anchor_y,
-        anchored_z=anchor_z,
-    )
+    try:
+        out = devices_core.update_device(
+            client,
+            device_id,
+            name=name,
+            ref_rssi=ref_rssi,
+            anchored_x=anchor_x,
+            anchored_y=anchor_y,
+            anchored_z=anchor_z,
+            discovery=discovery,
+            include=include,
+            exclude=exclude,
+            id_prefix_filter=id_prefix_filter,
+            accuracy=accuracy,
+            distance=distance,
+        )
+    except devices_core.DeviceSettingsError as exc:
+        _abort(str(exc))
+        return
     emit(ctx, {"device_id": device_id, "result": out or "no fields"})
 
 
