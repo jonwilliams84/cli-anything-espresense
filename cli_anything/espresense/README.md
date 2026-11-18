@@ -358,6 +358,22 @@ lists/prefixes, `accuracy:` and `distance:` are clamps in metres that must be
 overwritten. `list-in-config` / `show-in-config` promote these fields to
 columns/keys in their summaries; unknown future keys still land under `extra`.
 
+The same filters exist on the companion's **runtime** device copy, and since
+v0.16.0 `devices set` reaches them too — live, with no config push and no
+restart:
+
+```bash
+cli-anything-espresense devices set 'tile:abc' \
+  --distance 6 --accuracy 2 --no-discovery --include 'tile:1,tile:2'
+```
+
+The runtime PUT sends only the fields you pass, uses the same guard rails
+(non-empty filter strings, clamps > 0) and the companion's camelCase key
+spellings (`idPrefixFilter`, ...) — but deliberately has **no `--clear-*`
+twins**: the runtime store cannot express "absent key", so clearing a filter
+is a durable change that belongs on `devices update-in-config --clear-*`
+followed by a restart. Tune live, make it durable on the config side.
+
 ### Tune timeouts, MQTT, locators and optimizers
 
 Everything in config.yaml that is *not* a floor, room, node or device is
@@ -431,7 +447,7 @@ is the `absorption` setting) for a reading you took at a known distance.
 | `floors list / show / add / rename / retag / set-bounds / fit-bounds / delete` | Full floor CRUD in config.yaml |
 | `nodes list / show / add / place / remove-from-config / rename-in-config / set-point / restart / delete / update-firmware / put-settings` | Manage nodes from the companion side |
 | `node info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete / calibrate` | Direct HTTP to one ESP node, incl. device distance calibration |
-| `devices list / show / set / delete` | Tracked devices, companion runtime view (phones, tags, beacons) |
+| `devices list / show / set / delete` | Tracked devices, companion runtime view (phones, tags, beacons); `set` also tunes the runtime location filters live (`--include`/`--exclude`/`--id-prefix-filter`, `--accuracy`/`--distance`, `--discovery`) |
 | `devices whereis / occupancy` | Live presence queries: last known position of one device; who is in which room right now |
 | `devices list-in-config / show-in-config / add-to-config / update-in-config / remove-from-config` | The durable `devices:` block of config.yaml, incl. the per-device location filters (`--include`/`--exclude`/`--id-prefix-filter`, `--accuracy`/`--distance` clamps, `--discovery`, each with a `--clear-*` twin) |
 | `settings show / get / set / unset / locators / locator / optimizers / optimizer` | Tuning half of config.yaml: timeouts, mqtt, gps, locators, optimizers |

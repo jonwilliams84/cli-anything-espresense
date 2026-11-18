@@ -16,6 +16,7 @@ from cli_anything.espresense.core import (
     calibration as calibration_core,
     config_devices as config_devices_core,
     config_yaml as config_yaml_core,
+    devices,
     global_settings as global_settings_core,
     history as history_core,
     mqtt as mqtt_core,
@@ -2355,3 +2356,99 @@ class TestConfigDeviceFilters:
         config_devices_core.update(cfg, "b", distance=None)
         config_devices_core.remove(cfg, "b")
         assert self._yaml(cfg) == text
+
+
+# ── devices.update_device: the runtime-side location filters (v0.16.0) ──────
+
+
+class TestRuntimeDeviceFilters:
+    """devices.update_device carries the six filters on the runtime PUT.
+
+    v0.15.0 brought them to config.yaml; this completes the live half —
+    the same guard rails (non-empty strings, clamps > 0) and the same
+    camelCase spellings the companion's device object exposes, with NO
+    clear-twins because the runtime store cannot express an absent key.
+    """
+
+    def _client(self):
+        client = MagicMock()
+        client.put = MagicMock(return_value={"ok": True})
+        return client
+
+    def test_discovery_flag_sent_as_bool(self):
+        client = self._client()
+        devices.update_device(client, "dev1", discovery=False)
+        sent = client.put.call_args[1]["json"]
+        assert sent == {"discovery": False}
+
+    def test_include_sent_stripped(self):
+        client = self._client()
+        devices.update_device(client, "dev1", include=" a,b ")
+        sent = client.put.call_args[1]["json"]
+        assert sent == {"include": "a,b"}
+
+    def test_exclude_and_prefix_map_to_camel_case(self):
+        client = self._client()
+        devices.update_device(client, "dev1", exclude="ghost", id_prefix_filter="tile:")
+        sent = client.put.call_args[1]["json"]
+        assert sent == {"exclude": "ghost", "idPrefixFilter": "tile:"}
+
+    def test_integral_clamp_stays_int(self):
+        client = self._client()
+        devices.update_device(client, "dev1", accuracy=3.0)
+        assert client.put.call_args[1]["json"] == {"accuracy": 3}
+
+    def test_fractional_clamp_stays_float(self):
+        client = self._client()
+        devices.update_device(client, "dev1", distance=10.5)
+        assert client.put.call_args[1]["json"] == {"distance": 10.5}
+
+    def test_filters_mix_with_identity(self):
+        client = self._client()
+        devices.update_device(client, "dev1", name="Watch", include="w1", distance=8)
+        sent = client.put.call_args[1]["json"]
+        assert sent == {"name": "Watch", "include": "w1", "distance": 8}
+
+    def test_zero_clamp_refused(self):
+        client = self._client()
+        with pytest.raises(devices.DeviceSettingsError) as exc:
+            devices.update_device(client, "dev1", accuracy=0)
+        assert "disables" in str(exc.value)
+        client.put.assert_not_called()
+
+    def test_negative_clamp_refused(self):
+        client = self._client()
+        with pytest.raises(devices.DeviceSettingsError):
+            devices.update_device(client, "dev1", distance=-1)
+        client.put.assert_not_called()
+
+    def test_non_numeric_clamp_refused(self):
+        with pytest.raises(devices.DeviceSettingsError):
+            devices.update_device(self._client(), "dev1", distance="ten")
+
+    def test_empty_string_filter_refused(self):
+        client = self._client()
+        with pytest.raises(devices.DeviceSettingsError) as exc:
+            devices.update_device(client, "dev1", include="")
+        assert "non-empty" in str(exc.value)
+        client.put.assert_not_called()
+
+    def test_whitespace_only_filter_refused(self):
+        with pytest.raises(devices.DeviceSettingsError):
+            devices.update_device(self._client(), "dev1", include="   ")
+
+    def test_runtime_filter_keys_are_the_only_spellings(self):
+        # the PUT must use the companion's camelCase key set, pinned here so
+        # a rename can never silently drift into a key the companion ignores
+        assert set(devices.RUNTIME_FILTER_KEYS.values()) == {
+            "include",
+            "exclude",
+            "idPrefixFilter",
+            "accuracy",
+            "distance",
+        }
+
+    def test_no_settings_at_all_still_returns_none(self):
+        client = self._client()
+        assert devices.update_device(client, "dev1") is None
+        client.put.assert_not_called()

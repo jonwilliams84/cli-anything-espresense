@@ -49,7 +49,7 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 | `floors` | `list / show / add / rename / retag / set-bounds / fit-bounds / delete` — full floor CRUD in config.yaml |
 | `nodes` | `list / show / add / place / remove-from-config / rename-in-config / set-point / restart / delete / update-firmware / put-settings` — manage nodes from the companion side |
 | `node` | `info / restart / reboot / settings / set / rename / scan-wifi / devices / config-list / config-set / config-delete / calibrate` — direct HTTP to one ESP firmware node, incl. the firmware's device distance calibration flow |
-| `devices` | `list / show / set / delete / whereis / occupancy` — tracked devices (phones, tags, beacons), incl. last-known position and live room occupancy |
+| `devices` | `list / show / set / delete / whereis / occupancy` — tracked devices (phones, tags, beacons), incl. last-known position and live room occupancy; `set` edits the live runtime settings — identity (name, ref-rssi, anchors), the `discovery` toggle and the same per-device location filters as the config side (`--include` / `--exclude` / `--id-prefix-filter`, `--accuracy` / `--distance` clamps > 0), via `PUT /api/device/<id>` with no push and no restart — clearing a filter is durable, so it lives on `devices update-in-config --clear-*` |
 | `devices ...-config` | `list-in-config / show-in-config / add-to-config / update-in-config / remove-from-config` — the durable `devices:` block of config.yaml, incl. the companion's per-device location filters: `--include` / `--exclude` / `--id-prefix-filter` (comma-separated id lists / prefixes), `--accuracy` and `--distance` clamps (metres, > 0), `--discovery/--no-discovery` (HA entity), each filter with a `--clear-*` twin |
 | `calibration` | `get / summary / reset / auto-optimize / compute` — calibration matrix + autocalibration, plus a pure `compute` command turning a measured RSSI at a known distance into the `rssi@1m` value config.yaml wants |
 | `history` | `get / trail / heatmap` — per-device position history, a movement summary (room segments per visit, first/last seen, rooms visited in order), and a fleet-level room-usage heatmap (points, visits, dwell seconds and devices per room, across all tracked devices) |
@@ -410,7 +410,7 @@ the file on start, hence the `--restart` flag on every mutating command.
 python3 -m pytest cli_anything/espresense/tests/ -v
 ```
 
-1748 tests, 98.4% coverage — all against synthetic data on disk, no live
+1771 tests, 98.4% coverage — all against synthetic data on disk, no live
 broker, cluster or companion required. They cover the YAML round-trip, room
 rename + rotate (including atomic cycles and trailing-whitespace handling),
 the polygon/bounds maths (including the cases where two rooms must *not* be

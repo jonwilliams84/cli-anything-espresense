@@ -2460,3 +2460,156 @@ class TestDeviceFiltersE2E:
         text = env.cfg.read_text()
         assert "distance: 7" in text
         assert "accuracy: 3" in text
+
+
+# ── devices set: the runtime-side location filters (v0.16.0) ─────────────────
+
+
+class TestRuntimeDeviceFiltersE2E:
+    """`devices set` completes the filter story on the LIVE transport.
+
+    v0.15.0 brought the six location filters to the durable config.yaml side
+    (`devices ...-config`); the runtime half — PUT /api/device/<id>, no push,
+    no restart — could still only curate identity. These tests run the real
+    Click CLI against a mocked companion and pin the flags, the JSON shapes,
+    the guard rails, and the live-then-verify workflow.
+    """
+
+    def _invoke(self, tmp_path, monkeypatch, client, *args):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch("cli_anything.espresense.espresense_cli.make_client", return_value=client):
+            return CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "devices", "set", *args]
+            )
+
+    def test_discovery_off(self, tmp_path, monkeypatch):
+        client = MagicMock()
+        client.put.return_value = {"id": "d1"}
+        res = self._invoke(tmp_path, monkeypatch, client, "d1", "--no-discovery")
+        assert res.exit_code == 0
+        assert json.loads(res.output)["result"] == {"id": "d1"}
+        assert client.put.call_args[1]["json"]["discovery"] is False
+
+    def test_filter_flags_reach_the_runtime_put(self, tmp_path, monkeypatch):
+        client = MagicMock()
+        client.put.return_value = {"ok": True}
+        res = self._invoke(
+            tmp_path,
+            monkeypatch,
+            client,
+            "tile-1",
+            "--include",
+            " tile:1, tile:2 ",
+            "--id-prefix-filter",
+            "tile:",
+            "--distance",
+            "12",
+            "--accuracy",
+            "3.5",
+        )
+        assert res.exit_code == 0
+        sent = client.put.call_args[1]["json"]
+        assert sent == {
+            "include": "tile:1, tile:2",  # outer strip only — config-side parity
+            "idPrefixFilter": "tile:",
+            "distance": 12,
+            "accuracy": 3.5,
+        }
+
+    def test_zero_clamp_aborts_with_json(self, tmp_path, monkeypatch):
+        client = MagicMock()
+        res = self._invoke(tmp_path, monkeypatch, client, "d1", "--distance", "0")
+        assert res.exit_code == 1
+        assert "must be > 0" in res.output
+        client.put.assert_not_called()
+
+    def test_empty_filter_aborts(self, tmp_path, monkeypatch):
+        client = MagicMock()
+        res = self._invoke(tmp_path, monkeypatch, client, "d1", "--include", "  ")
+        assert res.exit_code == 1
+        assert "non-empty" in res.output
+
+    def test_no_fields_still_reports_it(self, tmp_path, monkeypatch):
+        client = MagicMock()
+        res = self._invoke(tmp_path, monkeypatch, client, "d1")
+        assert res.exit_code == 0
+        assert json.loads(res.output)["result"] == "no fields"
+        client.put.assert_not_called()
+
+    def test_identity_fields_still_work(self, tmp_path, monkeypatch):
+        client = MagicMock()
+        client.put.return_value = {"name": "Renamed"}
+        res = self._invoke(tmp_path, monkeypatch, client, "d1", "--name", "Renamed")
+        assert res.exit_code == 0
+        assert json.loads(res.output)["result"] == {"name": "Renamed"}
+        assert client.put.call_args[1]["json"] == {"name": "Renamed"}
+
+    def test_help_names_the_filters(self):
+        result = CliRunner().invoke(cli, ["devices", "set", "--help"])
+        assert result.exit_code == 0
+        for flag in ("--include", "--exclude", "--id-prefix-filter", "--accuracy", "--distance"):
+            assert flag in result.output
+
+    def test_help_mentions_no_clear_twins_reason(self):
+        result = CliRunner().invoke(cli, ["devices", "set", "--help"])
+        assert result.exit_code == 0
+        # deliberately asymmetric with the config side: point at the durable twin
+        assert "update-in-config" in result.output
+
+    def test_human_output_reports_the_result(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        client = MagicMock()
+        client.put.return_value = {"ok": True}
+        with patch("cli_anything.espresense.espresense_cli.make_client", return_value=client):
+            res = CliRunner().invoke(
+                cli, ["--config", str(cfg), "devices", "set", "d1", "--include", "a"]
+            )
+        assert res.exit_code == 0
+        assert "d1" in res.output
+
+
+class TestDeviceFilterWorkflow:
+    """Live tune → verify → durable handoff: the two filter transports compose."""
+
+    def test_runtime_set_then_config_side_clear(self, tmp_path, monkeypatch):
+        """Retune a clamp live, verify the PUT, then make it durable: clear on
+        the config side (the only surface that can express 'absent'), the way
+        the help text prescribes."""
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        client = MagicMock()
+        client.put.return_value = {"ok": True}
+        with patch("cli_anything.espresense.espresense_cli.make_client", return_value=client):
+            live = CliRunner().invoke(
+                cli,
+                ["--config", str(cfg), "--json", "devices", "set", "d1", "--distance", "15"],
+            )
+        assert live.exit_code == 0
+        sent = client.put.call_args[1]["json"]
+        assert sent == {"distance": 15}
+
+        # durable half runs entirely offline against a local yaml FileSource
+        plan = tmp_path / "plan.yaml"
+        plan.write_text("devices:\n  - id: d1\n    distance: 15\n")
+        with patch("cli_anything.espresense.espresense_cli.make_config_source") as src:
+            from cli_anything.espresense.core.config_source import FileSource
+
+            src.return_value = FileSource(plan)
+            durable = CliRunner().invoke(
+                cli,
+                [
+                    "--config",
+                    str(cfg),
+                    "--json",
+                    "devices",
+                    "update-in-config",
+                    "d1",
+                    "--clear-distance",
+                ],
+            )
+        assert durable.exit_code == 0
+        out = json.loads(durable.output)
+        assert out["changed"] == ["distance"]
+        assert "distance:" not in plan.read_text()

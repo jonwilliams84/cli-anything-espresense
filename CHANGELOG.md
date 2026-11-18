@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.16.0] — 2026-11-18
+
+- **New: `devices set` edits the live per-device location filters.** v0.15.0
+  brought the companion's per-device *location filters* — `include` /
+  `exclude` (comma-separated id lists), `id_prefix_filter` (only ids starting
+  with one of the prefixes are tracked), the `accuracy` / `distance` clamps
+  and the `discovery` (Home Assistant entity) flag — to the durable
+  config.yaml side (`devices add-to-config` / `update-in-config`). But that
+  left the two transports asymmetric: the companion also keeps a **runtime**
+  device copy (`PUT /api/device/<id>`, applied immediately — no config push
+  and no restart needed) and the harness could still only curate its identity
+  fields. Until now, retuning a noisy beacon live meant hand-crafting the
+  PUT. One command closes that:
+  - **`devices set`** gains `--include`, `--exclude`, `--id-prefix-filter`,
+    `--accuracy`, `--distance` and `--discovery/--no-discovery`, alongside
+    the existing `--name` / `--ref-rssi` / `--anchor-*`. Only the fields you
+    pass are sent (the runtime copy keeps everything else), clamps must be
+    > 0 (a zero or negative clamp would disable the device, so it is
+    refused), filter strings must be non-empty, and integral clamps stay
+    integral in the JSON rather than shipping `7.0`.
+  - **Deliberately no `--clear-*` twins.** The runtime store cannot express
+    "absent key" — clearing a filter is a *durable* change, and the only
+    surface that can express it is config.yaml. Clearing stays with
+    `devices update-in-config --clear-*` + restart, and `devices set --help`
+    says so. Tune live, make it durable on the config side.
+  - Under the hood: `core/devices.py` grows `RUNTIME_FILTER_KEYS` (the
+    camelCase spellings the companion's device object exposes,
+    `idPrefixFilter` et al.), a `DeviceSettingsError` guard rail and
+    `_coerce_filter` applying the same rules the config side applies, while
+    `update_device` learns the six fields. The module docstring records the
+    asymmetry so a future `--clear-*` on the runtime side is a decision, not
+    an accident.
+  - Unit-tested in `test_core.py` (`TestRuntimeDeviceFilters`: every flag on
+    the wire, camelCase spellings pinned, integral/fractional clamps, guard
+    rails refusing bad values without a PUT, mixed with identity fields) and
+    E2E-tested in `test_full_e2e.py` (`TestRuntimeDeviceFiltersE2E`: flags
+    through the real CLI against a mocked companion, exit-1 aborts, no-fields
+    reporting unchanged, help surface; `TestDeviceFilterWorkflow`: live tune →
+    verify the PUT → durable clear on the config side, the workflow the help
+    prescribes).
+
 ## [0.15.0] — 2026-11-10
 
 - **New: the companion's per-device location filters are editable.** Until now
