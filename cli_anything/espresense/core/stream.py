@@ -50,20 +50,25 @@ def stream(
     ws = websocket.create_connection(url, timeout=5)
     try:
         ws.settimeout(0.5)
-        deadline_checked = False
+        quiet_reads = 0
         while True:
-            # Always attempt at least one read, even with a tiny duration,
-            # so a slow first tick cannot discard events that are already
-            # queued on the socket.
-            if deadline_checked and end and time.time() >= end:
-                break
-            deadline_checked = True
+            idle = False
             try:
                 raw = ws.recv()
             except websocket.WebSocketTimeoutException:
-                continue
+                raw = ""
+                idle = True
             if not raw:
+                idle = True
+            if idle:
+                # Only stop once the socket has stayed quiet past the
+                # deadline, so events already queued are still drained
+                # even with a tiny duration or a slow first tick.
+                quiet_reads += 1
+                if quiet_reads >= 2 and end and time.time() >= end:
+                    break
                 continue
+            quiet_reads = 0
             try:
                 event = json.loads(raw)
             except json.JSONDecodeError:
