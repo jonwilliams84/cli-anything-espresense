@@ -373,6 +373,7 @@ def classify_topic(topic: str) -> str:
       node_telemetry       `<...>/rooms/<node>/telemetry`
       device_sighting      `<...>/rooms/<room>/devices/<id>` (rssi/distance JSON)
       raw_device_distance  `<...>/devices/<device>/<node>`
+      device_presence      `<...>/devices/<device>`         (room / "away" mirror)
       companion_location   `<...>/companion/<device>`
     """
     parts = str(topic or "").split("/")
@@ -405,6 +406,8 @@ def classify_topic(topic: str) -> str:
     d = _mark("devices")
     if d is not None and d >= 0 and len(parts) - 1 - d == 2:
         return "raw_device_distance"
+    if d is not None and d >= 0 and len(parts) - 1 - d == 1:
+        return "device_presence"
     c = _mark("companion")
     if c is not None and len(parts) - 1 - c == 1:
         return "companion_location"
@@ -486,3 +489,155 @@ def device_configs_view(records: list[dict]) -> dict:
             continue
         view[device_id] = parse_payload(rec.get("payload", ""))
     return view
+
+
+# ─────────────────────────────────────────────────── device presence
+#
+# ESPresense mirrors each tracked device's presence onto the broker at
+# `<prefix>/devices/<device>`: the room name while the device is tracked in
+# a room (some producers append a confidence suffix, `room/100`), and the
+# bare word `away` when the device has not been seen. This is the topic
+# Home Assistant's device_tracker integration consumes, and it is retained —
+# so the *broker alone* answers "who is inside, and where", without the
+# companion REST API. That read-back completes the mqtt group's fleet of
+# retained-state views: settings, per-device configs, node status, node
+# telemetry, sightings, distances — and now presence.
+
+
+def _presence_device_id(topic: str, prefix: str) -> Optional[str]:
+    """The device id of a `<prefix>/devices/<device>` topic, else None.
+
+    Only the bare one-level presence shape counts: the raw-distance shape
+    (`<prefix>/devices/<device>/<node>`) is a different family and never
+    misattributes, and topics outside `prefix` are foreign.
+    """
+    rest = _presence_strip_prefix(topic, prefix)
+    if rest is None:
+        return None
+    parts = rest.split("/")
+    if len(parts) == 2 and parts[0] == "devices" and parts[1]:
+        return parts[1]
+    return None
+
+
+def _presence_strip_prefix(topic: str, prefix: str) -> Optional[str]:
+    if topic == prefix:
+        return ""
+    if topic.startswith(prefix + "/"):
+        return topic[len(prefix) + 1 :]
+    return None
+
+
+def parse_presence_payload(raw) -> dict:
+    """Normalise a device-presence payload to `{"room": str|None, "away": bool}`.
+
+    Accepted spellings, in the order they are tried:
+      * `"away"` (case-insensitive) — the not-seen state,
+      * a plain room name — `"Kitchen"`, and a `"room/100"` confidence
+        suffix is split off, so both firmware spellings land on `"room"`,
+      * a JSON object — the `room` (then `state`) key when it is a string.
+
+    Anything else (empty, unknown shapes) returns `{"room": None, "away":
+    False}` rather than guessing, and never raises.
+    """
+    payload = parse_payload(raw)
+    if isinstance(payload, dict):
+        value = payload.get("room", payload.get("state"))
+        if isinstance(value, str):
+            return _presence_scalar(value)
+        return {"room": None, "away": False}
+    return _presence_scalar("" if payload is None else str(payload))
+
+
+def _presence_scalar(text: str) -> dict:
+    value = str(text).strip()
+    if not value:
+        return {"room": None, "away": False}
+    if value.lower() == "away":
+        return {"room": None, "away": True}
+    room = value.split("/", 1)[0].strip()
+    if not room:
+        return {"room": None, "away": False}
+    return {"room": room, "away": False}
+
+
+def presence_view(
+    records: list[dict], *, prefix: Optional[str] = None, device: Optional[str] = None
+) -> dict:
+    """Fold `watch()` records into a device → presence mapping.
+
+    Input is `watch()` records from a `<prefix>/devices/+` subscription.
+    Per topic, `latest_by_topic` picks the winning record (a retained value
+    read-beats in-flight traffic), and `parse_presence_payload` normalises
+    it; both retained and live messages count — presence is *current* state,
+    unlike the settings views, which fold retained state only. The row
+    records `retain` so a caller can tell stored state from fresh transit.
+
+    With `prefix`, topics outside it are dropped; with `device`, every
+    other device is dropped. Returns `{"count": N, "inside": [...],
+    "away": [...], "devices": {device: {room, away, retain, ts}}}` with the
+    device lists sorted, so the output for a given broker state is stable.
+    """
+    latest = latest_by_topic(records)
+    devices: dict = {}
+    for topic, rec in latest.items():
+        device_id = _presence_device_id(str(topic), prefix or "espresense")
+        if device_id is None:
+            continue
+        if device and device_id != device:
+            continue
+        presence = parse_presence_payload(rec.get("payload", ""))
+        devices[device_id] = {
+            "room": presence["room"],
+            "away": presence["away"],
+            "retain": bool(rec.get("retain")),
+            "ts": rec.get("ts"),
+        }
+    inside = sorted(d for d, r in devices.items() if not r["away"])
+    away = sorted(d for d, r in devices.items() if r["away"])
+    return {"count": len(devices), "inside": inside, "away": away, "devices": devices}
+
+
+def presence_rows(snapshot: dict) -> list[dict]:
+    """Render a `presence_view` snapshot as human-table rows, sorted by device."""
+    rows: list[dict] = []
+    for device_id in sorted(snapshot.get("devices", {})):
+        entry = snapshot["devices"][device_id]
+        rows.append(
+            {
+                "device": device_id,
+                "room": "-" if entry["away"] else entry["room"],
+                "presence": "away" if entry["away"] else "inside",
+                "retained": entry["retain"],
+            }
+        )
+    return rows
+
+
+def presence_snapshot(
+    host: str,
+    *,
+    duration: float = 5.0,
+    prefix: str = "espresense",
+    device_id: Optional[str] = None,
+    port: int = 1883,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> dict:
+    """Subscribe to `<prefix>/devices/<device>` for `duration` seconds.
+
+    Returns the presence view plus topic_filter/duration/prefix context —
+    the readable counterpart to `mqtt watch '<prefix>/devices/+'`.
+    """
+    topic_filter = f"{prefix}/devices/{device_id or '+'}"
+    records = watch(
+        host,
+        topic_filter,
+        port=port,
+        username=username,
+        password=password,
+        duration=duration,
+    )
+    out = presence_view(records, prefix=prefix, device=device_id)
+    out.update({"topic_filter": topic_filter, "duration": duration, "prefix": prefix})
+    return out

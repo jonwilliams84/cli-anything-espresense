@@ -2613,3 +2613,235 @@ class TestDeviceFilterWorkflow:
         out = json.loads(durable.output)
         assert out["changed"] == ["distance"]
         assert "distance:" not in plan.read_text()
+
+
+# ── mqtt presence (broker-only "who is where") ──────────────────────────────
+
+PRESENCE_RECORDS = [
+    {
+        "topic": "espresense/devices/apple:1005:9-12",
+        "payload": "Kitchen",
+        "ts": 1.0,
+        "retain": True,
+    },
+    {"topic": "espresense/devices/tile:xyz", "payload": "Garage/100", "ts": 2.0, "retain": True},
+    {"topic": "espresense/devices/watch:abc", "payload": "away", "ts": 3.0, "retain": True},
+    {
+        "topic": "espresense/devices/live:only",
+        "payload": "Office",
+        "ts": 4.0,
+        "retain": False,
+    },
+    # a neighbour-family record that must never count as presence
+    {"topic": "espresense/devices/d1/kitchen", "payload": "3.0", "ts": 5.0, "retain": True},
+]
+
+
+class TestMqttPresenceE2E:
+    def test_requires_broker(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "presence"])
+        assert result.exit_code == 1
+        assert "no MQTT broker" in result.output
+
+    def test_json_snapshot(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.core.mqtt.watch", return_value=PRESENCE_RECORDS
+        ) as mock_watch:
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "--json", "mqtt", "presence"])
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["topic_filter"] == "espresense/devices/+"
+        assert out["prefix"] == "espresense"
+        assert out["count"] == 4  # the raw-distance neighbour never counts
+        assert out["inside"] == ["apple:1005:9-12", "live:only", "tile:xyz"]
+        assert out["away"] == ["watch:abc"]
+        assert out["devices"]["tile:xyz"]["room"] == "Garage"  # confidence split off
+        assert out["devices"]["live:only"]["retain"] is False
+        assert mock_watch.call_args[0][1] == "espresense/devices/+"
+
+    def test_human_output_renders_presence_table(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=PRESENCE_RECORDS):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "presence"])
+        assert result.exit_code == 0
+        assert "inside:" in result.output
+        assert "Kitchen" in result.output
+        assert "watch:abc" in result.output
+        assert "away" in result.output
+
+    def test_human_output_when_nothing_heard(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=[]):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "presence"])
+        assert result.exit_code == 0
+        assert "no device presence" in result.output
+
+    def test_device_filter_reports_one_device(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.core.mqtt.watch", return_value=PRESENCE_RECORDS
+        ) as mock_watch:
+            result = CliRunner().invoke(
+                cli,
+                ["--config", str(cfg), "--json", "mqtt", "presence", "--device", "tile:xyz"],
+            )
+        assert result.exit_code == 0
+        out = json.loads(result.output)
+        assert out["present"] is True
+        assert out["room"] == "Garage"
+        assert out["away"] is False
+        assert mock_watch.call_args[0][1] == "espresense/devices/tile:xyz"
+
+    def test_absent_device_exits_1(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=PRESENCE_RECORDS):
+            result = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "mqtt", "presence", "--device", "nope"]
+            )
+        assert result.exit_code == 1
+        out = json.loads(result.output)
+        assert out["present"] is False
+
+    def test_missing_broker_error_is_aborted_cleanly(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        from cli_anything.espresense.core.mqtt import MqttError
+
+        with patch("cli_anything.espresense.core.mqtt.watch", side_effect=MqttError("boom")):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "presence"])
+        assert result.exit_code == 1
+        assert "boom" in result.output
+
+    def test_custom_prefix_flows_through(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=[]):
+            result = CliRunner().invoke(
+                cli,
+                ["--config", str(cfg), "--json", "mqtt", "presence", "--prefix", "home/sensors"],
+            )
+        assert result.exit_code == 0
+        assert json.loads(result.output)["topic_filter"] == "home/sensors/devices/+"
+
+    def test_mqtt_error_from_snapshot_is_aborted(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        from cli_anything.espresense.core.mqtt import MqttError
+
+        with patch("cli_anything.espresense.core.mqtt.watch", side_effect=MqttError("down")):
+            result = CliRunner().invoke(cli, ["--config", str(cfg), "mqtt", "presence"])
+        assert result.exit_code == 1
+
+    def test_help(self):
+        result = CliRunner().invoke(cli, ["mqtt", "presence", "--help"])
+        assert result.exit_code == 0
+        assert "device_tracker" in result.output
+
+
+class TestMqttPresenceWorkflow:
+    """presence composes with the writer the fleet already has: `mqtt pub`."""
+
+    def test_pub_then_presence_read_back_gates_scripts(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.core.mqtt.watch",
+            side_effect=lambda _h, topic_filter, **kw: (
+                [
+                    # retained pub a fresh subscriber is served first ...
+                    {
+                        "topic": "espresense/devices/apple:1005:9-12",
+                        "payload": "Kitchen",
+                        "ts": 1.0,
+                        "retain": True,
+                    }
+                ]
+                if topic_filter.endswith("apple:1005:9-12")
+                else []
+            ),
+        ):
+            readback = CliRunner().invoke(
+                cli,
+                [
+                    "--config",
+                    str(cfg),
+                    "--json",
+                    "mqtt",
+                    "presence",
+                    "--device",
+                    "apple:1005:9-12",
+                ],
+            )
+            away = CliRunner().invoke(
+                cli,
+                ["--config", str(cfg), "--json", "mqtt", "presence", "--device", "watch:abc"],
+            )
+        assert readback.exit_code == 0
+        assert json.loads(readback.output)["room"] == "Kitchen"
+        assert away.exit_code == 1  # gates like `mqtt get` does
+
+    def test_agrees_with_a_raw_watch_of_the_same_topic(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch(
+            "cli_anything.espresense.core.mqtt.watch", return_value=PRESENCE_RECORDS
+        ) as mock_watch:
+            presence = CliRunner().invoke(
+                cli, ["--config", str(cfg), "--json", "mqtt", "presence", "--duration", "1"]
+            )
+            firehose = CliRunner().invoke(
+                cli,
+                [
+                    "--config",
+                    str(cfg),
+                    "--json",
+                    "mqtt",
+                    "watch",
+                    "espresense/devices/+",
+                    "--duration",
+                    "1",
+                ],
+            )
+        assert presence.exit_code == 0 and firehose.exit_code == 0
+        assert mock_watch.call_count == 2
+        # presence and the plain firehose see the same evidence
+        seen = {r["topic"] for r in json.loads(firehose.output)}
+        snap = json.loads(presence.output)
+        for device in snap["devices"]:
+            assert f"espresense/devices/{device}" in seen
+
+    def test_topics_inventory_classifies_the_presence_family(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, json.dumps({"mqtt_host": "broker.local"}))
+        monkeypatch.setattr("cli_anything.espresense.core.project.DEFAULT_CONFIG_PATH", cfg)
+        with patch("cli_anything.espresense.core.mqtt.watch", return_value=PRESENCE_RECORDS):
+            inventory = CliRunner().invoke(
+                cli,
+                ["--config", str(cfg), "--json", "mqtt", "presence"],
+            )
+            topics = CliRunner().invoke(
+                cli,
+                [
+                    "--config",
+                    str(cfg),
+                    "--json",
+                    "mqtt",
+                    "topics",
+                    "--family",
+                    "device_presence",
+                ],
+            )
+        assert inventory.exit_code == 0 and topics.exit_code == 0
+        topics_out = json.loads(topics.output)
+        assert topics_out["count"] == 3  # live:only was not retained, distance is another family
+        assert all(
+            r["family"] == "device_presence" and r["topic"].startswith("espresense/devices/")
+            for r in topics_out["topics"]
+        )
