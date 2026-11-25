@@ -145,6 +145,12 @@ cli-anything-espresense mqtt node-status
 cli-anything-espresense mqtt telemetry --duration 5
 cli-anything-espresense mqtt telemetry --node kitchen --json
 
+# who is inside and where? (retained <prefix>/devices/<id> presence mirror —
+# the device_tracker topic Home Assistant consumes; broker works even when
+# the companion REST API does not)
+cli-anything-espresense mqtt presence
+cli-anything-espresense mqtt presence --device apple:1005:9-12 --json
+
 # which rooms actually get used? (folds every tracked device's history)
 cli-anything-espresense history heatmap
 cli-anything-espresense history heatmap --device apple:1005:9-12 --limit 500
@@ -168,6 +174,15 @@ device — the `strongest` room (best latest rssi) and the `closest` room
 device strongly or merely reports a plausible distance. `devices whereis` exits 1 when
 the device has never been seen (but still emits `{"found": false}` JSON), so it
 can gate a script like `rooms locate` does.
+
+`mqtt presence` completes the broker-only presence questions: it subscribes
+to `<prefix>/devices/+` (narrowed with `--device`, which exits 1 while that
+device is absent, like `mqtt get`) and folds the retained device_tracker
+mirror into one snapshot — `room`/`away` per device, `inside` and `away`
+device lists, with a `room/100` confidence suffix split off and JSON
+`{"room": ...}` mirrors accepted. The bulk view is the broker-side twin of
+`devices occupancy`; the filtered view twins `devices whereis`. Both work
+when the companion is down, which is the point of the transport split.
 
 ### Reading retained broker state
 

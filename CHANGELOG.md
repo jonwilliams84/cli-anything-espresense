@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.17.0] — 2026-11-25
+
+- **New: `mqtt presence` — "who is inside, and in which room", with the broker
+  alone.** The mqtt read-back family could verify every piece of retained
+  deployment state — `mqtt settings` (global settings), `mqtt devices`
+  (per-device fingerprints), `mqtt get` (any single topic), `mqtt topics`
+  (the whole tree), `mqtt distances` / `sightings` (signal), `mqtt
+  node-status` (nodes) — but the one question agents actually need when the
+  companion REST API is down, *where is everyone*, was still unreachable
+  without REST: `devices occupancy` and `devices whereis` both go through
+  the companion. ESPresense meanwhile mirrors each tracked device's presence
+  onto the broker at `<prefix>/devices/<device>` — the retained device_tracker
+  topic Home Assistant consumes (room name while seen, bare `away` when not).
+  One command closes it:
+  - **`mqtt presence`** subscribes to `<prefix>/devices/+` (like the other
+    mqtt views it needs only the broker the nodes already talk to) and folds
+    it into a snapshot: per device `{room, away, retain, ts}` plus sorted
+    `inside` / `away` device lists. **`--device <id>`** narrows the
+    subscription to that device and exits 1 while it is absent, so it gates
+    scripts exactly like `mqtt get` / `mqtt devices --device` do (`mqtt
+    presence --device apple:1005:9-12 || echo away`). `--prefix` and
+    `--duration` behave like the neighbouring commands.
+  - Payload spellings are normalised, never guessed: a plain room name is a
+    room, the `room/100` confidence suffix some producers append is split
+    off, `away` is recognised case-insensitively, and a JSON mirror
+    (`{"room": ...}` / `{"state": ...}`) is accepted; anything else comes
+    back as no-presence rather than a fabricated room. `classify_topic`
+    learns the shape as the **`device_presence`** family (one segment after
+    `devices`), so `mqtt topics` inventories it and it can never be confused
+    with the two-segment `raw_device_distance` shape one level deeper.
+  - Unlike the settings folds, `presence_view` counts live messages too —
+    presence is *current* state, not restart-surviving state — but a retained
+    value still read-beats a newer live one via the existing
+    `latest_by_topic`, and rows carry `retain` so stored vs. in-flight is
+    always visible.
+  - Why it matters: the transport split (companion REST / node HTTP / MQTT)
+    exists so a degraded companion does not blind you; this closes the last
+    presence gap in that story — broker-only occupancy, and the bulk twin of
+    `whereis`/`occupancy` for fleets that script against `--json`.
+  - Under the hood: `core/mqtt.py` grows `presence_view`, `presence_rows`,
+    `presence_snapshot` and `parse_presence_payload` alongside the existing
+    read-side folds. Unit-tested in `test_core.py`
+    (`TestDevicePresenceClassification`, `TestParsePresencePayload`,
+    `TestPresenceDeviceId`, `TestPresenceView`, `TestPresenceRowsAndSnapshot`)
+    and E2E-tested in `test_full_e2e.py` (`TestMqttPresenceE2E` against the
+    real CLI: missing-broker abort, JSON snapshot, human table, exit-1
+    gating, `--prefix` pass-through; `TestMqttPresenceWorkflow`: composes
+    with `mqtt pub`, agrees with a raw `mqtt watch` of the same filter, and
+    shows up classified under `mqtt topics --family device_presence`).
+
+
 ## [0.16.0] — 2026-11-18
 
 - **New: `devices set` edits the live per-device location filters.** v0.15.0

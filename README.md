@@ -53,7 +53,7 @@ overrides also work: `CLI_ESPRESENSE_BASE_URL`, etc.
 | `devices ...-config` | `list-in-config / show-in-config / add-to-config / update-in-config / remove-from-config` — the durable `devices:` block of config.yaml, incl. the companion's per-device location filters: `--include` / `--exclude` / `--id-prefix-filter` (comma-separated id lists / prefixes), `--accuracy` and `--distance` clamps (metres, > 0), `--discovery/--no-discovery` (HA entity), each filter with a `--clear-*` twin |
 | `calibration` | `get / summary / reset / auto-optimize / compute` — calibration matrix + autocalibration, plus a pure `compute` command turning a measured RSSI at a known distance into the `rssi@1m` value config.yaml wants |
 | `history` | `get / trail / heatmap` — per-device position history, a movement summary (room segments per visit, first/last seen, rooms visited in order), and a fleet-level room-usage heatmap (points, visits, dwell seconds and devices per room, across all tracked devices) |
-| `mqtt` | `set-node / set-device / set-global / pub / watch / get / settings / devices / topics / distances / sightings / node-status / telemetry` — raw MQTT pub/sub, read-back of retained broker state (any topic, the whole global-settings table, the whole per-device config table, and the full retained topic inventory with families and payload sizes — secrets redacted where applicable), plus aggregated live snapshots (node→device distances, per-room device sighting detail with rssi/exp_rssi + strongest/closest room, node online/offline, node health: uptime / free memory / RSSI / version) |
+| `mqtt` | `set-node / set-device / set-global / pub / watch / get / settings / devices / topics / presence / distances / sightings / node-status / telemetry` — raw MQTT pub/sub, read-back of retained broker state (any topic, the whole global-settings table, the whole per-device config table, and the full retained topic inventory with families and payload sizes — secrets redacted where applicable), plus aggregated live snapshots (who is inside and where off the retained device_tracker mirror, node→device distances, per-room device sighting detail with rssi/exp_rssi + strongest/closest room, node online/offline, node health: uptime / free memory / RSSI / version) |
 | `config` | `show / save` (local connection profile) + `doctor` (validate config.yaml) + `diff` (running-vs-deployed drift, exits 1 on differences) |
 | `repl` | Interactive shell (default with no subcommand) |
 
@@ -303,6 +303,23 @@ As with `mqtt settings`, only **retained** messages count — a live
 topic-shape fold (`.../settings/<id>/config`) means neighbouring
 `settings/<key>/set` records can never be misattributed to a device.
 
+### Who is inside, and where — with the broker alone
+
+The presence mirror `<prefix>/devices/<device>` is what Home Assistant's
+device_tracker integration consumes: ESPresense retains the room name
+there (an `away` payload when the device has not been seen, a `room/100`
+confidence suffix on some producers). `mqtt presence` folds it into one
+snapshot, so "who is inside and where" no longer needs the companion REST
+API — the same availability argument as every other `mqtt` read-back:
+
+```bash
+# Who is inside and where (broker-only occupancy, the twin of devices occupancy)
+cli-anything-espresense mqtt presence
+
+# One device's last known room; exits 1 while it is absent/away
+cli-anything-espresense mqtt presence --device apple:1005:9-12 || echo away
+```
+
 ## Quick examples
 
 ```bash
@@ -352,6 +369,10 @@ cli-anything-espresense mqtt set-global expiration 300
 # Every retained per-device config on the broker (verify a set-device push)
 cli-anything-espresense mqtt devices
 cli-anything-espresense mqtt devices --device apple:1005:9-12
+
+# Who is inside and where, off the retained device_tracker mirror (broker only)
+cli-anything-espresense mqtt presence
+cli-anything-espresense mqtt presence --device apple:1005:9-12 --json
 
 # Everything the deployment has STORED on the broker — one row per retained
 # topic, classified into families, secrets redacted

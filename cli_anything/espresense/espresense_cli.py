@@ -2823,6 +2823,92 @@ def mqtt_devices(ctx, device_id, duration, prefix):
         click.echo(f"{k}: {json.dumps(view[k], default=str)}")
 
 
+@mqtt.command("presence")
+@click.option("--device", "device_id", default=None, help="Only this device id")
+@click.option(
+    "--duration",
+    default=5.0,
+    type=float,
+    help="Seconds to listen (default: 5; retained values arrive at subscribe time)",
+)
+@click.option("--prefix", default=None, help="Topic prefix (default: espresense)")
+@click.pass_context
+def mqtt_presence(ctx, device_id, duration, prefix):
+    """Who is inside and where — straight off the broker's presence mirror.
+
+    ESPresense mirrors each tracked device's presence to
+    `<prefix>/devices/<device>`: the room name while the device is tracked
+    (a `room/100` confidence suffix is split off), and the bare word `away`
+    when the device has not been seen. That is the topic Home Assistant's
+    device_tracker integration consumes, and it is retained — so this
+    command answers "who is inside, and in which room" with the broker
+    alone, the exact scenario the MQTT route exists for (the companion
+    REST API can be down; this cannot).
+
+    The broker-side counterpart of `devices occupancy` / `devices whereis`:
+    the bulk view without --device, a single device's last known room with
+    it. Exits 1 when DEVICE is not on the broker, so it can gate a script:
+
+      mqtt presence --device apple:1005:9-12 || echo "away"
+
+    Example:
+      mqtt presence --duration 5
+      mqtt presence --device apple:1005:9-12 --json
+    """
+    p = prefix or ctx.obj.get("mqtt_topic_prefix", "espresense")
+    kw = _mqtt_args(ctx)
+    try:
+        out = mqtt_core.presence_snapshot(
+            duration=duration,
+            prefix=p,
+            device_id=device_id,
+            **kw,
+        )
+    except mqtt_core.MqttError as exc:
+        _abort(str(exc))
+        return
+    if device_id:
+        present = device_id in out["devices"]
+        entry = out["devices"].get(device_id) or {"room": None, "away": True, "retain": False}
+        view = {
+            "prefix": p,
+            "device": device_id,
+            "present": present,
+            "room": entry["room"],
+            "away": entry["away"],
+            "retained": entry["retain"],
+        }
+        emit(ctx, view)
+        if not present:
+            sys.exit(1)
+        return
+    if ctx.obj.get("as_json"):
+        emit(ctx, out)
+        return
+    rows = mqtt_core.presence_rows(out)
+    if not rows:
+        click.echo(
+            f"no device presence on {p}/devices/+ — nothing has been mirrored, "
+            "or the device tracker payload never arrived during the listen"
+        )
+        return
+    inside = ", ".join(sorted(r["device"] for r in rows if r["presence"] == "inside")) or "-"
+    away = ", ".join(sorted(r["device"] for r in rows if r["presence"] == "away")) or "-"
+    click.echo(f"inside: {inside}")
+    click.echo(f"away:   {away}")
+    header = f"{'device':<28} {'room':<16} {'presence':>8} {'retained':>8}"
+    click.echo(header)
+    for r in rows:
+        click.echo(
+            "{:<28} {:<16} {:>8} {:>8}".format(
+                str(r["device"])[:28],
+                "-" if r["room"] is None else str(r["room"])[:16],
+                r["presence"],
+                str(r["retained"]).lower(),
+            )
+        )
+
+
 @mqtt.command("get")
 @click.argument("topic")
 @click.option(

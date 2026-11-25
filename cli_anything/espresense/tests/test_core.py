@@ -2452,3 +2452,191 @@ class TestRuntimeDeviceFilters:
         client = self._client()
         assert devices.update_device(client, "dev1") is None
         client.put.assert_not_called()
+
+
+# ───────────────────────────────────────────── device presence (mqtt presence)
+
+
+def _rec(topic, payload, *, retain=True, ts=0.0):
+    return {"topic": topic, "payload": payload, "ts": ts, "retain": retain}
+
+
+class TestDevicePresenceClassification:
+    """`<prefix>/devices/<device>` is now its own family: device_presence."""
+
+    def test_bare_device_topic(self):
+        assert mqtt_core.classify_topic("espresense/devices/apple:1:9-12") == "device_presence"
+
+    def test_prefix_is_irrelevant(self):
+        assert mqtt_core.classify_topic("home/devices/tag") == "device_presence"
+
+    def test_never_shadows_raw_device_distance(self):
+        # one segment deeper is the per-node raw distance, unchanged
+        assert mqtt_core.classify_topic("espresense/devices/d1/kitchen") == "raw_device_distance"
+
+    def test_never_shadowed_by_rooms_shapes(self):
+        assert mqtt_core.classify_topic("espresense/rooms/kitchen/devices/d1") == "device_sighting"
+
+    def test_topic_inventory_counts_the_family(self):
+        records = [
+            _rec("espresense/devices/d1", "Kitchen"),
+            _rec("espresense/devices/d2", "away"),
+            _rec("espresense/rooms/kitchen/status", "online"),
+        ]
+        view = mqtt_core.topics_view(records)
+        assert view["families"]["device_presence"] == 2
+
+
+class TestParsePresencePayload:
+    def test_plain_room_name(self):
+        assert mqtt_core.parse_presence_payload("Kitchen") == {"room": "Kitchen", "away": False}
+
+    def test_room_with_confidence_suffix(self):
+        assert mqtt_core.parse_presence_payload("garage/100") == {"room": "garage", "away": False}
+
+    def test_away_is_case_insensitive(self):
+        for payload in ("away", "AWAY", "Away"):
+            assert mqtt_core.parse_presence_payload(payload) == {"room": None, "away": True}
+
+    def test_json_room_object(self):
+        assert mqtt_core.parse_presence_payload('{"room": "Office"}') == {
+            "room": "Office",
+            "away": False,
+        }
+
+    def test_json_state_object(self):
+        assert mqtt_core.parse_presence_payload('{"state": "Kitchen"}') == {
+            "room": "Kitchen",
+            "away": False,
+        }
+
+    def test_json_away_state(self):
+        assert mqtt_core.parse_presence_payload('{"state": "away"}') == {"room": None, "away": True}
+
+    def test_json_without_usable_key_is_not_a_room(self):
+        assert mqtt_core.parse_presence_payload('{"x": 1}') == {"room": None, "away": False}
+
+    def test_empty_payload_is_no_presence(self):
+        assert mqtt_core.parse_presence_payload("") == {"room": None, "away": False}
+
+    def test_broken_json_is_text_and_land_on_a_room(self):
+        assert mqtt_core.parse_presence_payload('{"room"') == {"room": '{"room"', "away": False}
+
+    def test_slash_only_room_becomes_no_presence(self):
+        assert mqtt_core.parse_presence_payload("/100") == {"room": None, "away": False}
+
+    def test_whitespace_is_trimmed(self):
+        assert mqtt_core.parse_presence_payload("  Kitchen  ") == {
+            "room": "Kitchen",
+            "away": False,
+        }
+
+
+class TestPresenceDeviceId:
+    def test_bare_shape(self):
+        assert mqtt_core._presence_device_id("espresense/devices/d1", "espresense") == "d1"
+
+    def test_raw_distance_shape_is_not_presence(self):
+        assert mqtt_core._presence_device_id("espresense/devices/d1/kitchen", "espresense") is None
+
+    def test_foreign_prefix_is_dropped(self):
+        assert mqtt_core._presence_device_id("other/devices/d1", "espresense") is None
+
+    def test_empty_device_segment(self):
+        assert mqtt_core._presence_device_id("espresense/devices/", "espresense") is None
+
+
+class TestPresenceView:
+    def test_rooms_and_away_split(self):
+        records = [
+            _rec("espresense/devices/d1", "Kitchen"),
+            _rec("espresense/devices/d2", "away"),
+            _rec("espresense/devices/d3", "Office", retain=False),
+        ]
+        view = mqtt_core.presence_view(records)
+        assert view["count"] == 3
+        assert view["inside"] == ["d1", "d3"]
+        assert view["away"] == ["d2"]
+        assert view["devices"]["d2"]["away"] is True
+
+    def test_retained_beats_newer_live(self):
+        records = [
+            _rec("espresense/devices/d1", "Kitchen", retain=True, ts=1.0),
+            _rec("espresense/devices/d1", "Gym", retain=False, ts=99.0),
+        ]
+        view = mqtt_core.presence_view(records)
+        assert view["devices"]["d1"]["room"] == "Kitchen"
+        assert view["devices"]["d1"]["retain"] is True
+
+    def test_recency_breaks_ties_within_same_retain_flag(self):
+        records = [
+            _rec("espresense/devices/d1", "Kitchen", retain=False, ts=1.0),
+            _rec("espresense/devices/d1", "Gym", retain=False, ts=2.0),
+        ]
+        assert mqtt_core.presence_view(records)["devices"]["d1"]["room"] == "Gym"
+
+    def test_raw_distance_neighbours_never_misattribute(self):
+        records = [_rec("espresense/devices/d1/kitchen", "Kitchen")]
+        view = mqtt_core.presence_view(records)
+        assert view["count"] == 0
+        assert view["devices"] == {}
+
+    def test_prefix_filter_drops_foreign_topics(self):
+        records = [
+            _rec("home/devices/d1", "Kitchen"),
+            _rec("espresense/devices/d2", "Gym"),
+        ]
+        view = mqtt_core.presence_view(records, prefix="home")
+        assert view["inside"] == ["d1"]
+
+    def test_device_filter_narrows(self):
+        records = [
+            _rec("espresense/devices/d1", "Kitchen"),
+            _rec("espresense/devices/d2", "Gym"),
+        ]
+        view = mqtt_core.presence_view(records, device="d2")
+        assert view["count"] == 1
+        assert view["devices"]["d2"]["room"] == "Gym"
+
+    def test_non_dict_records_are_ignored(self):
+        assert mqtt_core.presence_view(["junk", None])["count"] == 0
+
+
+class TestPresenceRowsAndSnapshot:
+    def test_rows_sorted_by_device_with_away_marker(self):
+        snapshot = mqtt_core.presence_view(
+            [
+                _rec("espresense/devices/b-d2", "away"),
+                _rec("espresense/devices/a-d1", "Kitchen", retain=False),
+            ]
+        )
+        rows = mqtt_core.presence_rows(snapshot)
+        assert [r["device"] for r in rows] == ["a-d1", "b-d2"]
+        assert rows[0]["presence"] == "inside"
+        assert rows[0]["retained"] is False
+        assert rows[1]["room"] == "-"
+        assert rows[1]["presence"] == "away"
+
+    def test_snapshot_subscribes_to_the_narrow_filter(self):
+        with patch.object(mqtt_core, "watch", return_value=[]) as mock_watch:
+            out = mqtt_core.presence_snapshot(
+                "broker.local",
+                duration=3.0,
+                prefix="home",
+                device_id="d1",
+                username="u",
+                password="p",
+            )
+        assert mock_watch.call_args[0][0] == "broker.local"
+        assert mock_watch.call_args[0][1] == "home/devices/d1"
+        assert out["topic_filter"] == "home/devices/d1"
+        assert out["duration"] == 3.0
+        assert out["prefix"] == "home"
+        assert out["count"] == 0
+
+    def test_snapshot_fold_matches_the_view(self):
+        records = [_rec("espresense/devices/d1", "Kitchen")]
+        with patch.object(mqtt_core, "watch", return_value=records):
+            out = mqtt_core.presence_snapshot("broker.local")
+        assert out["devices"]["d1"]["room"] == "Kitchen"
+        assert out["topic_filter"] == "espresense/devices/+"

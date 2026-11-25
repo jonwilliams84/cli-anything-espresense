@@ -46,7 +46,9 @@ per-node ESP32 web UI, and direct MQTT — behind a single Click CLI with full
 - Streaming live device-position events from the companion.
 - Answering presence questions without a firehose: where a device was last
   seen (`devices whereis`), who is in which room right now
-  (`devices occupancy`), which nodes hear a device and at what distance
+  (`devices occupancy`), who is inside and where straight off the broker's
+  retained device_tracker mirror — companion REST optional (`mqtt presence`),
+  which nodes hear a device and at what distance
   (`mqtt distances`), which rooms *hear* it best by signal strength, not just
   metres (`mqtt sightings`), and which nodes are online (`mqtt node-status`).
 - Auditing what the deployment has **stored on the broker** — every retained
@@ -92,7 +94,7 @@ cli-anything-espresense --base-url http://<companion-ip>:8267 config save
 | `settings` | `settings show`, `settings show --section mqtt`, `settings get locators.nelder_mead.enabled`, `settings set away_timeout 300`, `settings unset weighting.algorithm`, `settings locators`, `settings locator nadaraya_watson off`, `settings optimizers`, `settings optimizer absorption off` |
 | `calibration` | `calibration get`, `calibration summary`, `calibration reset`, `calibration auto-optimize on`, `calibration compute <rssi> <metres> [--absorption N]` (pure maths: a reading taken at a known distance → the `rssi@1m` config value; RSSI is signed, pass it like coordinates) |
 | `history` | `history get <device-id> --start 2026-05-10T00:00Z --limit 50`, `history trail <device-id>` (movement summary: room segments per visit, first/last seen, rooms visited), `history heatmap [--device <id>]... [--limit N]` (room usage across all tracked devices: points, visits, dwell seconds, devices per room, most-used first) |
-| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt settings [--key <k>] [--reveal]` (read back every retained global setting, parsed + secrets redacted; exits 1 for an absent `--key`), `mqtt devices [--device <id>]` (read back every retained per-device config on `<prefix>/settings/+/config` — the bulk read-back of `mqtt set-device`; `--device <id>` exits 1 while absent), `mqtt get <topic>` (read back any single topic's retained/live value; exits 1 when nothing there), `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt sightings [--device <id>] [--room <id>]` (per-room JSON sighting detail: rssi / exp_rssi, `strongest` + `closest` room per device — the rssi half `distances` drops), `mqtt node-status` (online/offline), `mqtt telemetry [--node <id>]` (node health snapshot: uptime, free memory, RSSI, version), `mqtt topics [--family <f>] [--topic <filter>] [--reveal]` (inventory of EVERY retained topic under the prefix in one `<prefix>/#` listen — topic family, payload size and parsed payload per row, secret setting values redacted unless `--reveal`; the bulk read-back of the whole tree) |
+| `mqtt` | `mqtt set-node <id> absorption 2.8`, `mqtt set-device <device-id> '{"name":"Watch"}'`, `mqtt pub <topic> <payload>`, `mqtt watch 'espresense/rooms/+/telemetry' --duration 10, `mqtt set-global expiration 300`, `mqtt settings [--key <k>] [--reveal]` (read back every retained global setting, parsed + secrets redacted; exits 1 for an absent `--key`), `mqtt devices [--device <id>]` (read back every retained per-device config on `<prefix>/settings/+/config` — the bulk read-back of `mqtt set-device`; `--device <id>` exits 1 while absent), `mqtt get <topic>` (read back any single topic's retained/live value; exits 1 when nothing there), `mqtt presence [--device <id>]` (who is inside and where, folded off the retained device_tracker mirror `<prefix>/devices/+`: room / `away` per device, `room/100` confidence suffixes split off; `--device <id>` exits 1 while that device is absent — the broker-only occupancy/whereis twin), `mqtt distances [--device <id>] [--node <id>]` (aggregated distance snapshot), `mqtt sightings [--device <id>] [--room <id>]` (per-room JSON sighting detail: rssi / exp_rssi, `strongest` + `closest` room per device — the rssi half `distances` drops), `mqtt node-status` (online/offline), `mqtt telemetry [--node <id>]` (node health snapshot: uptime, free memory, RSSI, version), `mqtt topics [--family <f>] [--topic <filter>] [--reveal]` (inventory of EVERY retained topic under the prefix in one `<prefix>/#` listen — topic family, payload size and parsed payload per row, secret setting values redacted unless `--reveal`; the bulk read-back of the whole tree) |
 | `config` | `config show`, `config save`, `config doctor --file cfg.yaml`, `config diff [--against draft.yaml] [--file cfg.yaml]` (running-vs-deployed drift, exits 1 on differences) |
 | `repl` | Interactive shell (default with no subcommand) |
 
@@ -293,7 +295,11 @@ have coordinates and want to confirm which room they land in.
 **Presence queries are read-only and safe to script.** `devices whereis`
 exits 1 (still emitting `{"found": false}` JSON) when the device has never
 been seen, so it can gate a workflow exactly like `rooms locate` does.
-`mqtt distances` and `mqtt node-status` listen on the broker for a bounded
+`mqtt presence --device <id>` exits 1 while that device is absent from the
+broker's presence mirror too (`mqtt presence` answers "who is inside, and in
+which room" for the whole deployment off the retained device_tracker mirror
+— with the companion REST API down, which is the point of the transport
+split). `mqtt distances` and `mqtt node-status` listen on the broker for a bounded
 window (`--duration` seconds) and return aggregated JSON — `distances` marks
 the closest node per device, so "which room is the phone really nearest" is
 `mqtt distances --device <id> --json` and read `nearest[0]`. When the
